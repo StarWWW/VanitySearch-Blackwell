@@ -77,7 +77,7 @@ int _ConvertSMVer2Cores(int major, int minor) {
 
 
 
-#define GRP_SIZE 1024
+#define GRP_SIZE VS_GRP
 #define STEP_SIZE GRP_SIZE*1
 
 // Launch configuration, overridable at build time (-DVS_TPB=... etc.)
