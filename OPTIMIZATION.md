@@ -10,11 +10,14 @@ value is an estimate, the text says so.
 |---|---|---|
 | SM cycles per key (sm_120, locked clocks) | 1.000 | **0.892 (−10.8%)** |
 | RTX 5050 Laptop, 80 W power cap, wall clock | 1070 MK/s | **1166 MK/s (+9.0%)** |
-| RTX PRO 6000 Blackwell (Colab), wall clock | not measured¹ | **9.48 Gkey/s** |
+| RTX PRO 6000 Blackwell (Colab), wall clock | 8625 MK/s | **9479 MK/s (+9.9%)**¹ |
 
-¹ The intermediate version (first three changes below) ran at 9.02 Gkey/s on the
-same card. The final version ran at 9.48 Gkey/s, which is +5.1%. The cycle
-measurement predicted +4.9%.
+¹ Same card, measured in separate Colab sessions. The intermediate version (first
+three changes below) ran at 9015 MK/s. The final version adds +5.1% on top of it,
+and the cycle measurement predicted +4.9%. The total of +9.9% is below the ≈ +12%
+the cycle count implies. Part of the gap is the power limit: with the final
+version the card reaches 598 W of its 600 W limit and its clock drops by up to
+~1% (see below).
 
 ## Two metrics, because GPUs hit different limits
 

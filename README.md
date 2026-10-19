@@ -12,7 +12,7 @@ cycles per key**, and every change was A/B measured and verified.
 |---|---|---|
 | SM cycles per key (sm_120, locked clocks) | 1.000 | **0.892** |
 | RTX 5050 Laptop (80 W power cap) | 1070 MK/s | **1166 MK/s (+9.0%)** |
-| RTX PRO 6000 Blackwell (Google Colab) | — | **9.48 Gkey/s** |
+| RTX PRO 6000 Blackwell (Google Colab) | 8625 MK/s | **9479 MK/s (+9.9%)** |
 
 How it was done, including the experiments that failed, is in **[OPTIMIZATION.md](OPTIMIZATION.md)**.
 In short, the kernel is bound by the ALU pipe, which is filled by the rotations and boolean functions
