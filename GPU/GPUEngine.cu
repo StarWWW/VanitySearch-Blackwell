@@ -511,6 +511,23 @@ void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddres
 
 }
 
+bool GPUEngine::SetSingleTarget(const uint8_t* hash160) {
+
+    uint32_t h[5];
+    uint32_t one = 1;
+    memcpy(h, hash160, 20);
+    cudaMemcpyToSymbol(_targetH160, h, sizeof(h));
+    cudaMemcpyToSymbol(_singleTarget, &one, sizeof(one));
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("GPUEngine: SetSingleTarget: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+
+}
+
 int GPUEngine::GetStepSize() {
 
     return STEP_SIZE;

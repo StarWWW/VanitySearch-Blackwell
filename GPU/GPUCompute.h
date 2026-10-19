@@ -25,6 +25,11 @@
 
 
 
+// Single full-address search: the hash160 is compared directly against constant memory
+// instead of going through the 128KB prefix table (one global load per key).
+__device__ __constant__ uint32_t _singleTarget = 0;
+__device__ __constant__ uint32_t _targetH160[5];
+
 __device__ __noinline__ void CheckPoint(uint32_t *_h, int32_t incr, address_t *address, uint32_t *lookup32, uint32_t *out) {
 
   uint32_t   off;
@@ -37,6 +42,12 @@ __device__ __noinline__ void CheckPoint(uint32_t *_h, int32_t incr, address_t *a
   uint32_t   mi;
   uint32_t   lmi;
   
+
+    if (_singleTarget) {
+        if (_h[0] != _targetH160[0]) return;
+        if (_h[1] != _targetH160[1] || _h[2] != _targetH160[2] || _h[3] != _targetH160[3] || _h[4] != _targetH160[4]) return;
+        goto addItem;
+    }
 
     // Lookup table
     pr0 = *(address_t *)(_h);

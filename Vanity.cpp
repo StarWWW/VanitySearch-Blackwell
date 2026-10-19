@@ -916,6 +916,14 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	g.SetSearchType(searchType);
 	if (onlyFull) {
 		g.SetAddress(usedAddressL, nbAddress);
+		if (nbAddress == 1) {
+			for (int i = 0; i < (int)addresses.size(); i++) {
+				if (addresses[i].items) {
+					g.SetSingleTarget((*addresses[i].items)[0].hash160);
+					break;
+				}
+			}
+		}
 	}
 	else {
 		g.SetAddress(usedAddress);

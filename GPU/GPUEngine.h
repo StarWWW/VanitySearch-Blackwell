@@ -64,6 +64,7 @@ public:
   void FreeGPUEngine();
   void SetAddress(std::vector<address_t> addresses);
   void SetAddress(std::vector<LADDRESS> addresses,uint32_t totalAddress);
+  bool SetSingleTarget(const uint8_t *hash160);
   bool SetKeys(Point *p);
   bool SetRandomJump(Point p);
   void SetSearchMode(int searchMode);
