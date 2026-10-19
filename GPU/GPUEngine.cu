@@ -81,16 +81,26 @@ int _ConvertSMVer2Cores(int major, int minor) {
 #define STEP_SIZE GRP_SIZE*1
 
 // Launch configuration, overridable at build time (-DVS_TPB=... etc.)
+// 128 threads/block (barriers then sync 4 warps instead of 8) with 2x the blocks keeps the
+// threads per launch unchanged; -2.1% cycles per key on sm_120 (bench/cycles.py).
 #ifndef VS_TPB
-#define VS_TPB 256
+#define VS_TPB 128
 #endif
 #ifndef VS_BPSM
-#define VS_BPSM 128
+#define VS_BPSM 256
 #endif
 #ifdef VS_MINBLOCKS
 #define VS_BOUNDS __launch_bounds__(VS_TPB, VS_MINBLOCKS)
 #else
 #define VS_BOUNDS
+#endif
+
+// Block-wide barriers in comp_keys keep the warps of a block on the same Gx[i]/Gy[i] constants.
+// No shared memory is used, so they are not needed for correctness (VS_NOBARRIER=1 drops them).
+#if defined(VS_NOBARRIER) && VS_NOBARRIER
+#define VS_SYNC()
+#else
+#define VS_SYNC() __syncthreads()
 #endif
 
 __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
@@ -116,7 +126,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
     uint64_t subp[GRP_SIZE/2][4];
     
 
-    __syncthreads();
+    VS_SYNC();
     Load256A(sx, startx);
     Load256A(sy, starty);
 
@@ -127,7 +137,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
     odd_py = sy[0] & 1;
     _GetHash160Comp(sx, odd_py, (uint8_t*)h);
     CheckPoint(h, GRP_SIZE / 2, sAddress, lookup32, out);
-    __syncthreads();
+    VS_SYNC();
 
     ModSub256(sxn, _2Gnx, sx);
     Load256(subp[GRP_SIZE / 2 - 1], sxn);
@@ -144,14 +154,14 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
     inverse[4] = 0;
     _ModInv(inverse);
 
-    __syncthreads();
+    VS_SYNC();
     
     ModNeg256(syn, sy);
     ModNeg256(sxn, sx);
 
     for (i = 0; i < GRP_SIZE / 2 - 1; i++) {
 
-        __syncthreads();
+        VS_SYNC();
         ModSub256(sx_gx, Gx[i], sxn);
 
         _ModMult(dx, subp[i], inverse);
@@ -172,7 +182,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
 
         //////////////////
 
-        __syncthreads();
+        VS_SYNC();
 
         ModSub256(dy, syn, Gy[i]);
         _ModMult(dy, dx);
@@ -193,7 +203,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
 
     }
 
-    __syncthreads();
+    VS_SYNC();
 
     _ModMult(dx, subp[i], inverse);
 
@@ -212,7 +222,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
 
     //////////////////
 
-    __syncthreads();
+    VS_SYNC();
 
     ModSub256(dy, _2Gny, sy);
     ModSub256(dx, Gx[i], sx);
@@ -227,7 +237,7 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
     _ModMult(py, dy);
     ModSub256(py, _2Gny);               
 
-    __syncthreads();
+    VS_SYNC();
     Store256A(startx, px);
     Store256A(starty, py);
 

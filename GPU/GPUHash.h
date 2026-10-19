@@ -41,6 +41,20 @@ __device__ __constant__ uint32_t K[] =
 };
 
 #define ROR(x,n) ((x>>n)|(x<<(32-n)))
+
+// On sm_120 IADD3 (3-input add) only issues on the ALU-heavy pipe, which SHF/LOP3 already
+// saturate, while IMAD runs on the FMA pipe that is ~60% idle. _fadd(a,b) = a*1+b is one IMAD;
+// the 1 comes from constant memory so the compiler cannot fold it back into an IADD3.
+// VS_FADD bits: 1 = SHA256 round adds, 2 = SHA256 message schedule, 4 = RIPEMD160 round adds.
+#ifndef VS_FADD
+#define VS_FADD 7
+#endif
+__device__ __constant__ uint32_t _one = 1;
+__device__ __forceinline__ uint32_t _fadd(uint32_t a, uint32_t b) {
+  uint32_t r;
+  asm("mad.lo.u32 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(_one), "r"(b));
+  return r;
+}
 #define S0(x) (ROR(x,2) ^ ROR(x,13) ^ ROR(x,22))
 #define S1(x) (ROR(x,6) ^ ROR(x,11) ^ ROR(x,25))
 #define s0(x) (ROR(x,7) ^ ROR(x,18) ^ (x >> 3))
@@ -55,10 +69,17 @@ __device__ __constant__ uint32_t K[] =
 #define Ch(x,y,z) (z ^ (x & (y ^ z)))
 
 
+#if VS_FADD & 1
+#define S2Round(a, b, c, d, e, f, g, h, k, w) \
+    t1 = _fadd(S1(e), _fadd(Ch(e,f,g), h + k + (w))); \
+    d += t1; \
+    h = _fadd(S0(a), t1 + Maj(a,b,c));
+#else
 #define S2Round(a, b, c, d, e, f, g, h, k, w) \
     t1 = h + S1(e) + Ch(e,f,g) + k + (w); \
     d += t1; \
-    h = t1 + S0(a) + Maj(a,b,c);\
+    h = t1 + S0(a) + Maj(a,b,c);
+#endif
 
 __device__ __constant__ uint32_t K_wmix_init[] =
 {
@@ -85,6 +106,26 @@ w[15] += s1(w[13]) + w[8] + s0(w[0]);\
 }
 
 // WMIX
+#if VS_FADD & 2
+#define WMIX() { \
+w[0] = _fadd(s1(w[14]), _fadd(s0(w[1]), w[0] + w[9]));\
+w[1] = _fadd(s1(w[15]), _fadd(s0(w[2]), w[1] + w[10]));\
+w[2] = _fadd(s1(w[0]), _fadd(s0(w[3]), w[2] + w[11]));\
+w[3] = _fadd(s1(w[1]), _fadd(s0(w[4]), w[3] + w[12]));\
+w[4] = _fadd(s1(w[2]), _fadd(s0(w[5]), w[4] + w[13]));\
+w[5] = _fadd(s1(w[3]), _fadd(s0(w[6]), w[5] + w[14]));\
+w[6] = _fadd(s1(w[4]), _fadd(s0(w[7]), w[6] + w[15]));\
+w[7] = _fadd(s1(w[5]), _fadd(s0(w[8]), w[7] + w[0]));\
+w[8] = _fadd(s1(w[6]), _fadd(s0(w[9]), w[8] + w[1]));\
+w[9] = _fadd(s1(w[7]), _fadd(s0(w[10]), w[9] + w[2]));\
+w[10] = _fadd(s1(w[8]), _fadd(s0(w[11]), w[10] + w[3]));\
+w[11] = _fadd(s1(w[9]), _fadd(s0(w[12]), w[11] + w[4]));\
+w[12] = _fadd(s1(w[10]), _fadd(s0(w[13]), w[12] + w[5]));\
+w[13] = _fadd(s1(w[11]), _fadd(s0(w[14]), w[13] + w[6]));\
+w[14] = _fadd(s1(w[12]), _fadd(s0(w[15]), w[14] + w[7]));\
+w[15] = _fadd(s1(w[13]), _fadd(s0(w[0]), w[15] + w[8]));\
+}
+#else
 #define WMIX() { \
 w[0] += s1(w[14]) + w[9] + s0(w[1]);\
 w[1] += s1(w[15]) + w[10] + s0(w[2]);\
@@ -103,6 +144,7 @@ w[13] += s1(w[11]) + w[6] + s0(w[14]);\
 w[14] += s1(w[12]) + w[7] + s0(w[15]);\
 w[15] += s1(w[13]) + w[8] + s0(w[0]);\
 }
+#endif
 
 // ROUND
 #define SHA256_RND(k) {\
@@ -199,13 +241,20 @@ __device__ void RIPEMD160Initialize(uint32_t s[5]) {
 #define f4(x, y, z) ((x & z) | (~z & y))
 #define f5(x, y, z) (x ^ (y | ~z))
 
+#if VS_FADD & 4
+#define RIPADD4(a, f, x, k) _fadd(f, a + x + k)
+#define RIPADD3(a, f, x) _fadd(f, a + x)
+#else
+#define RIPADD4(a, f, x, k) (a + f + x + k)
+#define RIPADD3(a, f, x) (a + f + x)
+#endif
 #define RPRound(a,b,c,d,e,f,x,k,r) \
-  u = a + f + x + k; \
+  u = RIPADD4(a, f, x, k); \
   a = ROL(u, r) + e; \
   c = ROL10(c);
 
 #define RPRound_k(a,b,c,d,e,f,x,r) \
-  u = a + f + x; \
+  u = RIPADD3(a, f, x); \
   a = ROL(u, r) + e; \
   c = ROL10(c);
 
