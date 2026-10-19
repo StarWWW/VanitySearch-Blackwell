@@ -402,7 +402,11 @@ __device__ void RIPEMD160Transform(uint32_t s[5],uint32_t* w) {
 
 }
 
-__device__ __noinline__ void _GetHash160Comp(uint64_t *x, uint8_t isOdd, uint8_t *hash) {
+#ifndef HASH_INLINE
+#define HASH_INLINE __noinline__
+#endif
+
+__device__ HASH_INLINE void _GetHash160Comp(uint64_t *x, uint8_t isOdd, uint8_t *hash) {
 
   uint32_t *x32 = (uint32_t *)(x);
   uint32_t publicKeyBytes[16];

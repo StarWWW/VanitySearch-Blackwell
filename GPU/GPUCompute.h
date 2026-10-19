@@ -30,7 +30,11 @@
 __device__ __constant__ uint32_t _singleTarget = 0;
 __device__ __constant__ uint32_t _targetH160[5];
 
-__device__ __noinline__ void CheckPoint(uint32_t *_h, int32_t incr, address_t *address, uint32_t *lookup32, uint32_t *out) {
+#ifndef CHECK_INLINE
+#define CHECK_INLINE __noinline__
+#endif
+
+__device__ CHECK_INLINE void CheckPoint(uint32_t *_h, int32_t incr, address_t *address, uint32_t *lookup32, uint32_t *out) {
 
   uint32_t   off;
   addressl_t  l32;

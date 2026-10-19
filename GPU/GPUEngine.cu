@@ -80,7 +80,20 @@ int _ConvertSMVer2Cores(int major, int minor) {
 #define GRP_SIZE 1024
 #define STEP_SIZE GRP_SIZE*1
 
-__global__ void comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
+// Launch configuration, overridable at build time (-DVS_TPB=... etc.)
+#ifndef VS_TPB
+#define VS_TPB 256
+#endif
+#ifndef VS_BPSM
+#define VS_BPSM 128
+#endif
+#ifdef VS_MINBLOCKS
+#define VS_BOUNDS __launch_bounds__(VS_TPB, VS_MINBLOCKS)
+#else
+#define VS_BOUNDS
+#endif
+
+__global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uint64_t* keys, uint32_t* out) {
 
 
     uint64_t* startx = keys + (blockIdx.x * blockDim.x) * 8;
@@ -237,8 +250,8 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, gpuId);
 
-    NB_TRHEAD_PER_GROUP = 256;                                          //////////////////  GRID SIZE ////////////////
-    int nbThreadGroup = deviceProp.multiProcessorCount * 128;
+    NB_TRHEAD_PER_GROUP = VS_TPB;                                          //////////////////  GRID SIZE ////////////////
+    int nbThreadGroup = deviceProp.multiProcessorCount * VS_BPSM;
 
     if (!randomMode) {
         uint64_t powerOfTwo = 1;
