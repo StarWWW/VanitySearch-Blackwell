@@ -1,12 +1,12 @@
 # Optimising VanitySearch-Bitcrack for NVIDIA Blackwell (sm_120)
 
-This report describes the changes in this fork, how they were measured, and the
+This report describes the changes in VanitySearch-Blackwell, how they were measured, and the
 experiments that did not work and why. Every number below was measured. Where a
 value is an estimate, the text says so.
 
 ## TL;DR
 
-| | Original | This fork |
+| | Original | VanitySearch-Blackwell |
 |---|---|---|
 | SM cycles per key (sm_120, locked clocks) | 1.000 | **0.892 (−10.8%)** |
 | RTX 5050 Laptop, 80 W power cap, wall clock | 1070 MK/s | **1166 MK/s (+9.0%)** |
@@ -103,7 +103,7 @@ instructions per key, not a different instruction mix.
 ## Reproducing (Windows; Linux uses the Makefile)
 
 ```
-python bench/build.py base --ref upstream/master      # original
+python bench/build.py base --ref ":/^Import VanitySearch-Bitcrack"   # original: the first commit is the unmodified upstream import
 python bench/build.py opt                             # this tree
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 36 --n 3
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 34 --n 3 --random

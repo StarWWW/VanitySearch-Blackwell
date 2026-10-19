@@ -1,2 +1,14 @@
+# build output
 build/
+obj/
+*.o
+*.exe
+/vanitysearch
 __pycache__/
+# profiler reports
+*.ncu-rep
+*.ncu-repz
+*.nsys-rep
+*.sqlite
+# local helper, not part of the project
+/publish.ps1

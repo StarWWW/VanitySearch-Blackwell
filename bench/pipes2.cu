@@ -2,6 +2,9 @@
 // Each "A | B" test runs two independent chain families interleaved; if A and B use
 // different pipes the combined rate is ~ rate(A) + rate(B), if they share one it stays ~ rate(A).
 // Build: nvcc -O3 -arch=sm_120 -o pipes2.exe pipes2.cu
+// Read the result with Nsight Compute pipe counters (sm__inst_executed_pipe_*), e.g.
+//   ncu --kernel-id ::regex:k_:1 --metrics sm__inst_executed_pipe_aluheavy.sum,sm__inst_executed_pipe_fmaheavy.sum,sm__inst_executed.sum pipes2.exe
+// The printed timing ratios are latency-bound and not meaningful on their own.
 #include <cstdio>
 #include <cstdint>
 #include <cuda_runtime.h>

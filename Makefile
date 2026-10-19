@@ -2,6 +2,10 @@
 # Makefile for vanitysearch
 #
 # Author : Jean-Luc PONS
+#
+# Modified in 2026 for NVIDIA Blackwell (sm_120) throughput, see OPTIMIZATION.md and the git history.
+# Default target is sm_120 (Blackwell). Other GPUs: make CCAP=89 (Ada), CCAP=86 (Ampere), ...
+# Custom CUDA location: make CUDA=/usr/local/cuda-12.8
 
 SRC = Base58.cpp IntGroup.cpp main.cpp Random.cpp \
       Timer.cpp Int.cpp IntMod.cpp Point.cpp SECP256K1.cpp \
@@ -18,26 +22,28 @@ OBJET = $(addprefix $(OBJDIR)/, \
         hash/ripemd160_sse.o hash/sha256_sse.o \
         GPU/GPUEngine.o Bech32.o Wildcard.o)
 
-CXX        = g++-9
+CXX        = g++
 CUDA       = /usr/local/cuda
-CXXCUDA    = /usr/bin/g++-9
+CXXCUDA    = /usr/bin/g++
 NVCC       = $(CUDA)/bin/nvcc
+CCAP       = 120
+GENCODE    = -gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -gencode=arch=compute_$(CCAP),code=compute_$(CCAP)
 
 ifdef debug
-CXXFLAGS   = -mssse3 -Wno-write-strings -g -I. -I$(CUDA)/include
+CXXFLAGS   = -mssse3 -Wno-write-strings -g -fno-strict-aliasing -I. -I$(CUDA)/include -include cstdint
 else
-CXXFLAGS   = -mssse3 -Wno-write-strings -O2 -I. -I$(CUDA)/include
+CXXFLAGS   = -mssse3 -Wno-write-strings -O2 -fno-strict-aliasing -I. -I$(CUDA)/include -include cstdint
 endif
-LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
+LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart_static -ldl -lrt
 
 #--------------------------------------------------------------------
 
 ifdef debug
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 else
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_80,code=sm_80 -gencode=arch=compute_86,code=sm_86 -gencode=arch=compute_89,code=sm_89 -gencode=arch=compute_89,code=compute_89 -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
+	$(NVCC) -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include $(GENCODE) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 endif
 
 $(OBJDIR)/%.o : %.cpp

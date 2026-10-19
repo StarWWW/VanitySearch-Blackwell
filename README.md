@@ -1,82 +1,75 @@
-# VanitySearch-Bitrack with Optimization for BTC Puzzle 
+# VanitySearch-Blackwell
 
-# Feature
+Based on [FixedPaul/VanitySearch-Bitcrack](https://github.com/FixedPaul/VanitySearch-Bitcrack),
+which is in turn based on [Jean-Luc Pons' VanitySearch](https://github.com/JeanLucPons/VanitySearch). It is
+tuned for NVIDIA Blackwell GPUs (sm_120) through profiling.
 
-<ul>
-  <li>Optimized CUDA modular math for better performance (6900 MKeys/s on 4090, 8800 MKeys/s on 5090).</li>
-  <li>Less RAM usage.</li>
-  <li>Starting key setting function optimized with Ecc addition and batch modular inverse.</li>
-  <li>Easier definition of the range to scan by defining it as a power of 2.</li>
-  <li>Only 1 GPU allowed for better efficiency.</li>
-  <li>Only compressed addresses and prefixes.</li>
-  <li>Pressing "p" it is possibile to pause vanitysearch freeing the GPU, press again "p" to resume.</li>
-  <li>Added prefix search. Be careful to -m parameter.</li>
-  <li>NEW: Added Random mode. Each GPU thread scans 1024 consecutive random keys at each step.</li>
-  <li>NEW: Added backup mode. Approximately every 60 seconds, an automatic backup file is created for each GPU, containing information about the progress made in the last sequential search.
-This makes it possible, by using the "-backup" option, to resume the sequential search while keeping the progress from the last session.
-This is useful in case the program closes for any reason.</li>
+The tool searches a private-key range for a compressed P2PKH address. The command line is unchanged
+from upstream, see [README.upstream.md](README.upstream.md). The GPU kernel needs **10.8% fewer SM
+cycles per key**, and every change was A/B measured and verified.
 
-</ul>
+| GPU | Original | VanitySearch-Blackwell |
+|---|---|---|
+| SM cycles per key (sm_120, locked clocks) | 1.000 | **0.892** |
+| RTX 5050 Laptop (80 W power cap) | 1070 MK/s | **1166 MK/s (+9.0%)** |
+| RTX PRO 6000 Blackwell (Google Colab) | — | **9.48 Gkey/s** |
 
-# Usage
+How it was done, including the experiments that failed, is in **[OPTIMIZATION.md](OPTIMIZATION.md)**.
+In short, the kernel is bound by the ALU pipe, which is filled by the rotations and boolean functions
+of SHA-256 and RIPEMD-160. The FMA pipe is two-thirds idle. The wins came from moving the work that
+*can* move (reduction multiplies, 3-input additions) to the FMA pipe, plus a single-target fast path
+and a better launch shape.
 
+## What changed
 
-VanitySeacrh [-v] [-gpuId] [-i inputfile] [-o outputfile] [-start HEX] [-range] [-m] [-stop]
+* A single full-address search compares hash160 against constant memory instead of a 128 KB lookup table.
+* The hash160 and check functions are inlined.
+* The 512→320-bit field reduction uses multiplies instead of a shift/add expansion.
+* SHA-256 and RIPEMD-160 additions are expressed as `IMAD x·1 + y` (FMA pipe).
+* Launches use 128 threads per block with twice the blocks (same threads per launch).
+* Build-time tuning options are added (`VS_*`, see OPTIMIZATION.md).
+* Tooling is added: a Windows build script, a planted-key self-test, A/B and Nsight Compute
+  cycle benchmarks, and pipe microbenchmarks (`bench/`).
+* The Makefile now defaults to sm_120 and a current GCC/CUDA toolchain.
 
- -v: Print version
- 
- -i inputfile: Get list of addresses/prefixes to search from specified file
- 
- -o outputfile: Output results to the specified file
- 
- -gpuId: GPU to use, default is 0
- 
- -start start Private Key HEX
- 
- -range bit range dimension. start -> (start + 2^range)
+## Build
 
- -m: Max number of prefixes found by each kernel call, default is 262144 (use multiples of 65536)
+**Linux**, CUDA ≥ 12.8 for sm_120:
 
- -stop: Stop when all prefixes are found
+```
+make                 # sm_120 (Blackwell)
+make CCAP=89         # other GPUs: 89 = Ada, 86 = Ampere, ...
+```
 
- -random: Random mode active. Each GPU thread scan 1024 random sequentally keys at each step. Not active by default
+**Windows** (Visual Studio 2022 Build Tools + CUDA ≥ 12.8 + Python 3):
 
- -backup: Backup mode allows resuming from the progress percentage of the last sequential search. It does not work with random mode.
+```
+python bench/build.py opt            # -> build/opt/vanitysearch.exe
+```
 
+## Verify before you trust it
 
-If you want to search for multiple addresses or prefixes, insert them into the input file.
+```
+python bench/bench.py selftest build/opt/vanitysearch.exe --bits 36 --n 3            # sequential
+python bench/bench.py selftest build/opt/vanitysearch.exe --bits 34 --n 3 --random   # -random mode
+```
 
-Be careful, if you are looking for multiple prefixes, it may be necessary to increase MaxFound using "-m". Use multiples of 65536. The speed might decrease slightly.
+The self-test hides a random key in a small range and runs the tool. It then re-derives the
+reported key's address in pure Python, independently of the tool.
 
-In Random mode each thread selects a random number within its subrange and scans 512 keys forward and 512 keys backward. Random mode has no memory; the higher the percentage of the range that is scanned, the greater the probability that already scanned keys will be scanned again.
+## Google Colab
 
-----------------------------------------------------------------------------
+[`colab/puzzle71_blackwell.ipynb`](colab/puzzle71_blackwell.ipynb) is a self-contained notebook.
+Its UI is in Turkish. It builds upstream VanitySearch-Bitcrack plus this project's GPU changes (embedded
+as a patch) for the attached GPU and runs a self-test before searching. Found keys are checked
+independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
+realistic odds up front.
 
-Donations are always welcome! :) bc1qag46ashuyatndd05s0aqeq9d6495c29fjezj09
+## Credits and license
 
-# Exemples:
+* Original VanitySearch: Jean-Luc Pons (GPLv3)
+* VanitySearch-Bitcrack: FixedPaul (GPLv3)
+* Blackwell optimisation, tooling and report: VanitySearch-Blackwell (2026)
 
-Windows:
-
-
-```./VanitySearch.exe -gpuId 0 -i input.txt -o output.txt -start 3BA89530000000000 -range 40```
-
-```./VanitySearch.exe -gpuId 1 -o output.txt -start 3BA89530000000000 -range 42 1MVDYgVaSN6iKKEsbzRUAYFrYJadLYZvvZ```
-
-```./VanitySearch.exe -gpuId 0 -start 3BA89530000000000 -range 41 1MVDYgVaSN6iKKEsbzRUAYFrYJadLYZvvZ ```
-
-```./VanitySearch.exe -gpuId 0 -start 100000000000000000 -range 68 -random 19vkiEajfhuZ8bs8Zu2jgmC6oqZbWqhxhG```
-
-```./VanitySearch.exe -gpuId 0 -start 3BA89530000000000 -range 41 -backup 1MVDYgVaSN6iKKEsbzRUAYFrYJadLYZvvZ ```
-
-Linux
-
-```./vanitysearch -gpuId 0 -i input.txt -o output.txt -start 3BA89530000000000 -range 40```
-
-
-# License
-
-VanitySearch is licensed under GPLv3.
-
-
-
+Licensed under the GNU General Public License v3, see [LICENSE.txt](LICENSE.txt). Modified files
+carry a notice in their header. The full change history is in git.
