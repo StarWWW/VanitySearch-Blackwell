@@ -128,6 +128,17 @@ USUB(r[4],0ULL,r[4]); }
 
 
 
+// Multiply by 0x1000003D1 for the 512->320 reduction step. UMultSpecial expands it into
+// shifts/adds (ALU pipe); VS_REDMUL=1 uses real multiplies so the work goes to the FMA pipe.
+#ifndef VS_REDMUL
+#define VS_REDMUL 1
+#endif
+#if VS_REDMUL
+#define ReduceMult(r, a) UMult(r, a, 0x1000003D1ULL)
+#else
+#define ReduceMult(r, a) UMultSpecial(r, a)
+#endif
+
 // ---------------------------------------------------------------------------------------
 
 #define Load(r, a) {\
@@ -364,8 +375,7 @@ __device__ void _ModMult(uint64_t *r, uint64_t *a, uint64_t *b) {
   UADD1(r512[7], t[4]);
 
   // Reduce from 512 to 320
-  //UMult(t, (r512 + 4), 0x1000003D1ULL);
-  UMultSpecial(t, (r512 + 4));
+  ReduceMult(t, (r512 + 4));
   UADDO1(r512[0], t[0]);
   UADDC1(r512[1], t[1]);
   UADDC1(r512[2], t[2]);
@@ -416,7 +426,7 @@ __device__ void _ModMult(uint64_t *r, uint64_t *a) {
   UADD1(r512[7], t[4]);
 
   // Reduce from 512 to 320
-  UMultSpecial(t, (r512 + 4));
+  ReduceMult(t, (r512 + 4));
   UADDO1(r512[0], t[0]);
   UADDC1(r512[1], t[1]);
   UADDC1(r512[2], t[2]);
