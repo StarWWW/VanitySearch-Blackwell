@@ -63,7 +63,9 @@ reported key's address in pure Python, independently of the tool.
 Its UI is in Turkish. It builds upstream VanitySearch-Bitcrack plus this project's GPU changes (embedded
 as a patch) for the attached GPU and runs a self-test before searching. Found keys are checked
 independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
-realistic odds up front.
+realistic odds up front. The same notebook also runs outside Colab, in any Jupyter on Linux (apt-based
+CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in
+`~/vanitysearch-puzzle/`, or in `$PUZZLE_HOME` if set.
 
 ## Credits and license
 
