@@ -33,12 +33,8 @@
 #include "GPUGroup.h"
 #include "GPUMath.h"
 #include "GPUHash.h"
-#include "GPUBase58.h"
-#include "GPUWildcard.h"
 #include "GPUCompute.h"
 #include <iostream>
-
-#include <omp.h>
 
 int _ConvertSMVer2Cores(int major, int minor) {
 
@@ -255,12 +251,9 @@ __global__ void VS_BOUNDS comp_keys(address_t* sAddress, uint32_t* lookup32, uin
 
 
 // ---------------------------------------------------------------------------------------
-int NB_TRHEAD_PER_GROUP;
+int NB_THREAD_PER_GROUP;
 
 using namespace std;
-
-int g_gpuId;
-std::string globalGPUname;
 
 
 
@@ -278,7 +271,6 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     outputBufferPinned = NULL;
     initialised = false;
     lostWarning = false;
-    rekey = false;
     nbThread = 0;
     this->maxFound = maxFound;
     outputSize = 0;
@@ -309,7 +301,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
         return;
     }
 
-    NB_TRHEAD_PER_GROUP = VS_TPB;                                          //////////////////  GRID SIZE ////////////////
+    NB_THREAD_PER_GROUP = VS_TPB;                                          //////////////////  GRID SIZE ////////////////
     int nbThreadGroup = deviceProp.multiProcessorCount * VS_BPSM;
 
     if (!randomMode) {
@@ -322,8 +314,6 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
         nbThreadGroup = powerOfTwo;
     }
 
-
-    g_gpuId = gpuId;
 
     // Initialise CUDA
     cudaError_t err;
@@ -342,7 +332,7 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
 
    
 
-    this->nbThread = nbThreadGroup * NB_TRHEAD_PER_GROUP;//////////////////////////////////////////////////////////////////
+    this->nbThread = nbThreadGroup * NB_THREAD_PER_GROUP;//////////////////////////////////////////////////////////////////
     this->maxFound = maxFound;
     this->outputSize = (maxFound * ITEM_SIZE + 4);
 
@@ -350,12 +340,10 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     sprintf(tmp,"GPU #%d %s (%dx%d cores) Grid(%dx%d)",
     gpuId,deviceProp.name,deviceProp.multiProcessorCount,
     _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor),
-    nbThread / NB_TRHEAD_PER_GROUP,
-    NB_TRHEAD_PER_GROUP);
+    nbThread / NB_THREAD_PER_GROUP,
+    NB_THREAD_PER_GROUP);
 
     deviceName = std::string(tmp);
-
-    globalGPUname = deviceProp.name;
 
     // Prefer L1 (We do not use __shared__ at all)
     err = cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
@@ -428,8 +416,6 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     searchMode = SEARCH_COMPRESSED;
     searchType = P2PKH;
     initialised = true;
-    pattern = "";
-    hasPattern = false;
 
 }
 
@@ -534,29 +520,6 @@ bool GPUEngine::SetAddress(std::vector<address_t> addresses) {
     return true;
 
 }
-
-void GPUEngine::SetPattern(const char* pattern) {
-
-    strcpy((char*)inputAddressPinned, pattern);
-
-    // Fill device memory
-    cudaMemcpy(inputAddress, inputAddressPinned, _64K * 2, cudaMemcpyHostToDevice);
-
-    // We do not need the input pinned memory anymore
-    cudaFreeHost(inputAddressPinned);
-    inputAddressPinned = NULL;
-    lostWarning = false;
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("GPUEngine: SetPattern: %s\n", cudaGetErrorString(err));
-    }
-
-    hasPattern = true;
-
-}
-
-
 
 bool GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddress) {
 
@@ -707,7 +670,7 @@ bool GPUEngine::callKernel() {
     // Reset nbFound
     cudaMemset(outputBuffer, 0, 4);
 
-    comp_keys << < nbThread / NB_TRHEAD_PER_GROUP, NB_TRHEAD_PER_GROUP >> >
+    comp_keys << < nbThread / NB_THREAD_PER_GROUP, NB_THREAD_PER_GROUP >> >
         (inputAddress, inputAddressLookUp, inputKey, outputBuffer);
 
 
@@ -732,18 +695,18 @@ bool GPUEngine::SetKeys(Point* p) {
     // Sets the starting keys for each thread
     // p must contains nbThread public keys
 
-    for (int i = 0; i < nbThread; i += NB_TRHEAD_PER_GROUP) {
-        for (int j = 0; j < NB_TRHEAD_PER_GROUP; j++) {
+    for (int i = 0; i < nbThread; i += NB_THREAD_PER_GROUP) {
+        for (int j = 0; j < NB_THREAD_PER_GROUP; j++) {
 
-            inputKeyPinned[8 * i + j + 0 * NB_TRHEAD_PER_GROUP] = p[i + j].x.bits64[0];
-            inputKeyPinned[8 * i + j + 1 * NB_TRHEAD_PER_GROUP] = p[i + j].x.bits64[1];
-            inputKeyPinned[8 * i + j + 2 * NB_TRHEAD_PER_GROUP] = p[i + j].x.bits64[2];
-            inputKeyPinned[8 * i + j + 3 * NB_TRHEAD_PER_GROUP] = p[i + j].x.bits64[3];
+            inputKeyPinned[8 * i + j + 0 * NB_THREAD_PER_GROUP] = p[i + j].x.bits64[0];
+            inputKeyPinned[8 * i + j + 1 * NB_THREAD_PER_GROUP] = p[i + j].x.bits64[1];
+            inputKeyPinned[8 * i + j + 2 * NB_THREAD_PER_GROUP] = p[i + j].x.bits64[2];
+            inputKeyPinned[8 * i + j + 3 * NB_THREAD_PER_GROUP] = p[i + j].x.bits64[3];
 
-            inputKeyPinned[8 * i + j + 4 * NB_TRHEAD_PER_GROUP] = p[i + j].y.bits64[0];
-            inputKeyPinned[8 * i + j + 5 * NB_TRHEAD_PER_GROUP] = p[i + j].y.bits64[1];
-            inputKeyPinned[8 * i + j + 6 * NB_TRHEAD_PER_GROUP] = p[i + j].y.bits64[2];
-            inputKeyPinned[8 * i + j + 7 * NB_TRHEAD_PER_GROUP] = p[i + j].y.bits64[3];
+            inputKeyPinned[8 * i + j + 4 * NB_THREAD_PER_GROUP] = p[i + j].y.bits64[0];
+            inputKeyPinned[8 * i + j + 5 * NB_THREAD_PER_GROUP] = p[i + j].y.bits64[1];
+            inputKeyPinned[8 * i + j + 6 * NB_THREAD_PER_GROUP] = p[i + j].y.bits64[2];
+            inputKeyPinned[8 * i + j + 7 * NB_THREAD_PER_GROUP] = p[i + j].y.bits64[3];
 
         }
     }
@@ -853,7 +816,7 @@ bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
       nbFound = maxFound;
     }
 
-    // When can perform a standard copy, the kernel is eneded
+    // The kernel has ended, a standard copy can be done
     cudaMemcpy(outputBufferPinned, outputBuffer, nbFound * ITEM_SIZE + 4, cudaMemcpyDeviceToHost);
 
     for (uint32_t i = 0; i < nbFound; i++) {
@@ -872,21 +835,6 @@ bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
 
 }
 
-std::string toHex(unsigned char* data, int length) {
-
-    string ret;
-    char tmp[3];
-    for (int i = 0; i < length; i++) {
-        if (i && i % 4 == 0) ret.append(" ");
-        sprintf(tmp, "%02hhX", (int)data[i]);
-        ret.append(tmp);
-    }
-    return ret;
-
-}
-
-
-
 void GPUEngine::FreeGPUEngine() {  //free gpu for Pause function
 
     // Ensure all operations have completed before freeing memory
@@ -902,15 +850,4 @@ void GPUEngine::FreeGPUEngine() {  //free gpu for Pause function
 
     cudaDeviceReset();
 
-}
-
-
-bool GPUEngine::CheckHash(uint8_t* h, vector<ITEM>& found, int tid, int incr, int endo, int* nbOK) {
-
-    return true;
-}
-
-bool GPUEngine::Check(Secp256K1* secp) {
-
-    return true;
 }

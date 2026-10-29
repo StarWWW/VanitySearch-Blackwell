@@ -32,6 +32,32 @@ and a better launch shape.
   cycle benchmarks, and pipe microbenchmarks (`bench/`).
 * The Makefile now defaults to sm_120 and a current GCC/CUDA toolchain.
 
+### Fixes in v1.2
+
+* A mistyped `1...` address is rejected (wrong Base58 checksum or length) instead of being searched
+  for forever without a match.
+* `-backup` refuses a file written by a build with another group size (`VS_GRP`), whose progress
+  would map to the wrong keys and skip part of the range.
+* With `-stop` and several addresses, a pause (`p`) no longer forgets the addresses already found,
+  so the search still stops once all of them are found.
+* An address is marked as found only after its key is verified.
+* A very long line in the `-i` file no longer overflows a stack buffer in the Base58 decoder.
+* `-random` draws its jumps from a 64-bit generator seeded with 256 bits instead of a 32-bit seed.
+* `make` alone builds the program, and a header change rebuilds what depends on it.
+* `VanitySearch.vcxproj` uses the installed CUDA toolkit (`CUDA_PATH`, or `/p:CudaVersion=…`) and
+  architectures that CUDA 13 still supports (sm_75 … sm_120).
+* `bench/build.py` finds any Visual Studio 2022 edition, and builds older refs with their own
+  source list.
+* `tools/fetch_addresses.py` resumes an interrupted download.
+* The notebook's `multi` mode tests the bloom-filter path (with the list's address type) before it
+  searches, accepts the keys of `bech32` lists (they were checked as `1...` addresses and dropped),
+  gives a large list time to load before its watchdog restarts the tool, uses longer blocks with
+  the `blocks` strategy (the list is reloaded for each block), and does not record the same found
+  key again in every session.
+* Unused code was removed: leftover RCKangaroo headers, the wildcard and SSE address checks, P2SH
+  branches, empty GPU checks, and the original prebuilt FixedPaul binaries (`VanitySearch 2.2/`,
+  still in the git history).
+
 ### Fixes in v1.1
 
 * The kernel no longer writes past the hit buffer when one launch finds more than `-m` hits.
@@ -106,7 +132,7 @@ vanitysearch [-gpuId N] [-start HEX] [-range BITS | -end HEX] [-stop] [-random] 
 | `-range BITS` | Scan `start` … `start + 2^BITS − 1` (default 30). |
 | `-end HEX` | **New:** last key (inclusive), for ranges that are not a power of two. |
 | `-stop` | Stop once every address has been found. |
-| `-random` | Each GPU thread jumps to a random key in its slice at every step. |
+| `-random` | At every step all GPU threads jump to the same random offset within their own slice of the range. |
 | `-backup` | Resume from `VSbackup_gpu<N>.dat`. The file is written every 60 launches, on pause, on Ctrl+C and at the end. A new run without `-backup` keeps the previous file as `.prev`. |
 | `-i file` / `-o file` | Addresses to search (one per line, `#` comments) / file the found keys are appended to (with public key and time). |
 | `-nobloom` | **New:** use the old 16/32-bit tables instead of the bloom filter for several full addresses. |
@@ -126,32 +152,41 @@ make                 # sm_120 (Blackwell)
 make CCAP=89         # other GPUs: 89 = Ada, 86 = Ampere, ...
 ```
 
-**Windows** (Visual Studio 2022 Build Tools + CUDA ≥ 12.8 + Python 3):
+**Windows** (Visual Studio 2022, any edition with "Desktop development with C++", + CUDA ≥ 12.8 + Python 3):
 
 ```
-python bench/build.py opt            # -> build/opt/vanitysearch.exe
+python bench/build.py opt            # -> build/opt/vanitysearch.exe, sm_120 only (--arch 89 for Ada, ...)
 ```
+
+`VanitySearch.sln` also builds, for sm_75 … sm_120, with the CUDA toolkit that `CUDA_PATH` points
+to (`msbuild /p:CudaVersion=12.8` picks another installed one).
 
 ## Verify before you trust it
 
 ```
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 36 --n 3            # sequential
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 34 --n 3 --random   # -random mode
+python bench/bench.py selftest build/opt/vanitysearch.exe --target bloom             # several addresses
 ```
 
 The self-test hides a random key in a small range and runs the tool. It then re-derives the
-reported key's address in pure Python, independently of the tool.
+reported key's address in pure Python, independently of the tool. `--target` selects the GPU path:
+`single` (default, one `1...` address), `bech32` (one `bc1q...` address), `bloom` (the address among
+1000 random ones, `-i`), `tables` (the same with `-nobloom`) and `prefix` (the first characters of the
+address; any key of the range with that prefix passes).
 
 ## Google Colab
 
 [`colab/puzzle71_blackwell.ipynb`](colab/puzzle71_blackwell.ipynb) is a self-contained notebook.
 Its UI is in Turkish. It clones this repository (`VS_REPO` / `VS_REF`, which can also be a local
-clone), builds it for the attached GPU and runs a self-test before searching. If the self-test fails, it
+clone), builds it for the attached GPU and runs a self-test before searching. A commit that was already
+built with the same compiler settings is reused instead of rebuilt. If the self-test fails, it
 falls back to the original FixedPaul source from this repository's first commit. Found keys are checked
 independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
 realistic odds up front. Set `SEARCH_MODE = "multi"` to search an address list instead of the single
 puzzle address: the notebook downloads the chosen list with `tools/fetch_addresses.py` (needs an
-`HF_TOKEN`, see above) and searches it through the GPU bloom filter. The same notebook also runs
+`HF_TOKEN`, see above) and searches it through the GPU bloom filter; its self-test then hides the test address in a list of the same
+address type, so the bloom-filter path is what gets tested. The same notebook also runs
 outside Colab, in any Jupyter on Linux (apt-based
 CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in
 `~/vanitysearch-puzzle/`, or in `$PUZZLE_HOME` if set.

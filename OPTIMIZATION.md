@@ -101,6 +101,7 @@ instructions per key, not a different instruction mix.
 | Same, halves combined with an add (ALU instructions really drop, LEA.HI 648 → 0) | laptop −3.9 … −17.6%, cycles +3.1% (IMAD.WIDE is half-rate and long-latency, and hash rounds are a serial chain) |
 | 64-bit carry chains as 32-bit IADD/IADD.X pairs | laptop ±0, cycles +0.2% |
 | 256×256 product with 32-bit limbs and PTX carry chains (`bench/fieldmul.cu`) | bit-exact on 65536 vectors and +2% in isolation, but **+3.6% cycles** in the kernel |
+| Full grid (SMs × 256 blocks) instead of rounding the sequential grid down to a power of two | cycles per key −0.11% on the RTX 5050 (5120 vs 4096 blocks): the tail of a launch is negligible, and the power of two keeps an exact split of power-of-two ranges and the backup layout |
 | Profiling read-out "long scoreboard 18%, barrier 14%" | wrong metric units; the per-instruction sampling above is the reliable one |
 
 ## Reproducing (Windows; Linux uses the Makefile)

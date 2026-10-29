@@ -25,8 +25,10 @@ import gzip
 import os
 import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
 
 REPO = "pymmdrza/Bitcoin_Wallet_Addresses"
 BASE = "https://huggingface.co/datasets/%s/resolve/main/" % REPO
@@ -47,10 +49,13 @@ def human(n):
         n /= 1024.0
 
 
-def open_remote(url, token):
+def open_remote(url, token, start=0):
     """GET url with the HF token, following the redirect to the CDN by hand so the
-    Authorization header is not leaked to the signed CDN URL."""
+    Authorization header is not leaked to the signed CDN URL. With start > 0 only the
+    bytes from start on are requested; returns None when there are none left (416)."""
     headers = {"User-Agent": "vanitysearch-fetch", "Accept-Encoding": "identity"}
+    rng = {"Range": "bytes=%d-" % start} if start else {}
+    headers.update(rng)
     if token:
         headers["Authorization"] = "Bearer " + token
 
@@ -63,9 +68,14 @@ def open_remote(url, token):
         return opener.open(urllib.request.Request(url, headers=headers), timeout=60)
     except urllib.error.HTTPError as e:
         if e.code in (301, 302, 303, 307, 308):
-            loc = e.headers["Location"]
-            return urllib.request.urlopen(
-                urllib.request.Request(loc, headers={"User-Agent": "vanitysearch-fetch"}), timeout=60)
+            loc = urllib.parse.urljoin(url, e.headers["Location"])
+            try:
+                return urllib.request.urlopen(
+                    urllib.request.Request(loc, headers=dict({"User-Agent": "vanitysearch-fetch"}, **rng)), timeout=60)
+            except urllib.error.HTTPError as e2:
+                if e2.code == 416:
+                    return None
+                raise
         if e.code in (401, 403):
             body = e.read(500).decode("utf-8", "replace")
             sys.exit("[ERROR] %d from Hugging Face: %s\n"
@@ -73,7 +83,7 @@ def open_remote(url, token):
                      "        then pass a read token with --token or the HF_TOKEN environment variable.\n"
                      "        Page: https://huggingface.co/datasets/%s" % (e.code, body.strip(), REPO))
         if e.code == 416:
-            sys.exit("[ERROR] the server rejected the resume range; delete the partial .txt and retry")
+            return None
         raise
 
 
@@ -107,38 +117,58 @@ def main():
     print("Downloading %s\n            %s -> %s" % (desc, remote, out))
     t0 = time.time()
 
-    # 1) stream the .gz to disk (so a retry can resume, and decompression is separate)
-    resp = open_remote(url, a.token)
-    total = int(resp.headers.get("Content-Length") or 0)
-    done = 0
-    last = 0.0
-    with open(gz_path, "wb") as f:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            done += len(chunk)
-            now = time.time()
-            if now - last > 0.5:
-                last = now
-                rate = done / (now - t0 + 1e-9)
-                pct = (" %5.1f%%" % (100.0 * done / total)) if total else ""
-                sys.stderr.write("\r  %s%s  %s/s   " % (human(done), pct, human(rate)))
-                sys.stderr.flush()
-    resp.close()
-    sys.stderr.write("\r  downloaded %s in %.0f s%s\n" % (human(done), time.time() - t0, " " * 20))
+    # 1) stream the .gz to disk. The .gz is kept until it is decompressed, so a run that was
+    #    interrupted resumes where it stopped instead of downloading everything again.
+    have = os.path.getsize(gz_path) if os.path.exists(gz_path) else 0
+    resp = open_remote(url, a.token, have)
+    if resp is None:
+        print("  %s is already complete (%s)" % (gz_path, human(have)))
+    else:
+        resumed = have > 0 and resp.status == 206
+        if have and not resumed:
+            print("  the server ignored the resume request, downloading from the start")
+        done = have if resumed else 0
+        total = int(resp.headers.get("Content-Length") or 0)
+        total = done + total if total else 0
+        if resumed:
+            print("  resuming after %s" % human(done))
+        first = done
+        last = 0.0
+        with open(gz_path, "ab" if resumed else "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                now = time.time()
+                if now - last > 0.5:
+                    last = now
+                    rate = (done - first) / (now - t0 + 1e-9)
+                    pct = (" %5.1f%%" % (100.0 * done / total)) if total else ""
+                    sys.stderr.write("\r  %s%s  %s/s   " % (human(done), pct, human(rate)))
+                    sys.stderr.flush()
+        resp.close()
+        sys.stderr.write("\r  downloaded %s in %.0f s%s\n" % (human(done), time.time() - t0, " " * 20))
+        if total and done != total:
+            sys.exit("[ERROR] the download stopped at %s of %s; run the same command again to resume"
+                     % (human(done), human(total)))
 
     # 2) stream-decompress to the plain .txt and count the addresses
     print("Decompressing...")
     n = 0
-    with gzip.open(gz_path, "rb") as src, open(out, "wb") as dst:
-        while True:
-            block = src.read(1 << 20)
-            if not block:
-                break
-            dst.write(block)
-            n += block.count(b"\n")
+    try:
+        with gzip.open(gz_path, "rb") as src, open(out, "wb") as dst:
+            while True:
+                block = src.read(1 << 20)
+                if not block:
+                    break
+                dst.write(block)
+                n += block.count(b"\n")
+    except (OSError, EOFError, zlib.error) as e:
+        os.remove(out)
+        sys.exit("[ERROR] %s is damaged (%s). It may mix an older version of the list with the\n"
+                 "        resumed part: delete it and run again." % (gz_path, e))
     if not a.keep_gz:
         os.remove(gz_path)
 

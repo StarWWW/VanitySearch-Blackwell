@@ -27,9 +27,7 @@
 #define SEARCH_BOTH 2
 
 
-// Number of thread per block
-//#define NB_TRHEAD_PER_GROUP 128 ///////////////////////////////256
-#define ITEM_SIZE 28  ///28
+#define ITEM_SIZE 28
 #define ITEM_SIZE32 (ITEM_SIZE/4)
 #define _64K 65536
 
@@ -71,14 +69,12 @@ public:
   bool SetRandomJump(Point p);
   void SetSearchMode(int searchMode);
   void SetSearchType(int searchType);
-  void SetPattern(const char *pattern);
   bool Launch(std::vector<ITEM> &addressFound,bool spinWait=false);
   int GetNbThread();
   int GetGroupSize();
   int GetStepSize();
   bool IsInitialised();
 
-  bool Check(Secp256K1 *secp);
   std::string deviceName;
 
   static void PrintCudaInfo();
@@ -88,15 +84,8 @@ private:
 
   bool callKernel();
   void ReleaseBuffers();
-  static void ComputeIndex(std::vector<int> &s, int depth, int n);
-  static void Browse(FILE *f,int depth, int max, int s);
-  bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
-
-
 
   int nbThread;
-  uint64_t *sub;
-  uint64_t *d_dx;
   address_t *inputAddress;
   address_t *inputAddressPinned;
   uint32_t *inputAddressLookUp;
@@ -109,16 +98,9 @@ private:
   bool initialised;
   uint32_t searchMode;
   uint32_t searchType;
-  bool littleEndian;
   bool lostWarning;
-  bool rekey;
   uint32_t maxFound;
   uint32_t outputSize;
-  std::string pattern;
-  bool hasPattern;
-
- 
-
 
 };
 

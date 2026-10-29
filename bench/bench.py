@@ -1,10 +1,14 @@
 """Correctness self-test and A/B speed benchmark for vanitysearch builds.
 
-  python bench/bench.py selftest build/base/vanitysearch.exe [--bits 36] [--n 3]
+  python bench/bench.py selftest build/base/vanitysearch.exe [--bits 36] [--n 3] [--target single]
   python bench/bench.py speed build/base/vanitysearch.exe build/opt/vanitysearch.exe [--seconds 40] [--rounds 3]
 
 selftest hides a random key in an aligned 2^bits range, asks the tool to find it and
-verifies the reported key independently (pure-Python secp256k1 + hash160).
+verifies the reported key independently (pure-Python secp256k1 + hash160). --target picks the
+GPU path under test:
+  single  one P2PKH address (constant-memory compare)       bech32  one bc1q address
+  bloom   the address among --decoys random ones (-i file)   tables  the same with -nobloom
+  prefix  the first characters of the address; any key of the range with that prefix passes
 speed runs the builds interleaved (A B A B ...) on the same range so thermal drift
 hits all of them equally, and reports the median MK/s after a warm-up period.
 """
@@ -95,11 +99,43 @@ def b58check(payload):
     return '1' * (len(b) - len(b.lstrip(b'\0'))) + s
 
 
+def hash160_from_key(k):
+    return ripemd160(hashlib.sha256(pubkey_compressed(k)).digest())
+
+
 def addr_from_key(k):
-    return b58check(b'\x00' + ripemd160(hashlib.sha256(pubkey_compressed(k)).digest()))
+    return b58check(b'\x00' + hash160_from_key(k))
+
+
+_BECH = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+
+
+def _bech32_polymod(values):
+    gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = (chk & 0x1ffffff) << 5 ^ v
+        for i in range(5):
+            chk ^= gen[i] if (b >> i) & 1 else 0
+    return chk
+
+
+def p2wpkh(h160):
+    """bc1q... address of a hash160 (BIP-173, witness version 0)."""
+    acc, bits, data = 0, 0, [0]
+    for b in h160:
+        acc = acc << 8 | b; bits += 8
+        while bits >= 5:
+            bits -= 5; data.append(acc >> bits & 31)
+    if bits: data.append(acc << (5 - bits) & 31)
+    hrp = [ord(c) >> 5 for c in 'bc'] + [0] + [ord(c) & 31 for c in 'bc']
+    pm = _bech32_polymod(hrp + data + [0] * 6) ^ 1
+    return 'bc1' + ''.join(_BECH[d] for d in data + [pm >> 5 * (5 - i) & 31 for i in range(6)])
 
 
 assert addr_from_key(1) == '1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH'
+assert p2wpkh(hash160_from_key(1)) == 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
 
 RX_KEY = re.compile(r'Priv \(HEX\):\s*0x\s*([0-9A-Fa-f]+)')
 RX_CAND = re.compile(r'CandKey:\s*([0-9A-Fa-f]+)')
@@ -130,12 +166,14 @@ def run_tool(cmd, timeout, on_line):
         p.wait()
 
 
-def selftest(exe, bits, n, timeout, random=False):
+def selftest(exe, bits, n, timeout, random=False, target='single', decoys=1000):
     ok_all = True
+    to_addr = (lambda c: p2wpkh(hash160_from_key(c))) if target == 'bech32' else addr_from_key
     for i in range(n):
         base = ((1 << 23) | secrets.randbelow(1 << 23)) << bits
         k = base + secrets.randbelow(1 << bits)
-        addr = addr_from_key(k)
+        addr = to_addr(k)
+        pattern = addr[:5] if target == 'prefix' else addr
         found, tail, t0 = [], [], time.time()
 
         def on_line(s):
@@ -144,12 +182,29 @@ def selftest(exe, bits, n, timeout, random=False):
             if m:
                 c = int(m.group(1), 16) % _N
                 for cand in (c, (_N - c) % _N):
-                    if addr_from_key(cand) == addr: found.append(cand)
+                    a = to_addr(cand)
+                    if a == addr or (target == 'prefix' and a.startswith(pattern)): found.append(cand)
             return bool(found) or 'Range Finished' in s
 
-        run_tool([exe, '-gpuId', '0', '-start', f'{base:x}', '-range', str(bits), '-stop'] + (['-random'] if random else []) + [addr],
-                 timeout, on_line)
-        ok = bool(found) and found[0] == k
+        cmd = [exe, '-gpuId', '0', '-start', f'{base:x}', '-range', str(bits), '-stop'] + (['-random'] if random else [])
+        listfile = None
+        if target in ('bloom', 'tables'):
+            # the planted address hidden among random ones, in the middle of the file
+            listfile = os.path.join(os.path.dirname(exe), f'selftest_{os.getpid()}.txt')
+            lines = [b58check(b'\x00' + secrets.token_bytes(20)) for _ in range(decoys)]
+            lines.insert(len(lines) // 2, addr)
+            with open(listfile, 'w') as fl: fl.write('\n'.join(lines) + '\n')
+            cmd += ['-i', listfile] + (['-nobloom'] if target == 'tables' else [])
+        else:
+            cmd += [pattern]
+        try:
+            run_tool(cmd, timeout, on_line)
+        finally:
+            if listfile: os.remove(listfile)
+        if target == 'prefix':
+            ok = bool(found) and base <= found[0] < base + (1 << bits)
+        else:
+            ok = bool(found) and found[0] == k
         ok_all &= ok
         print(f'  [{i + 1}/{n}] {"PASS" if ok else "FAIL"}  key={k:x}  {time.time() - t0:.1f}s', flush=True)
         if not ok: print('    ' + '\n    '.join(tail))
@@ -180,10 +235,14 @@ def main():
     ap.add_argument('--warmup', type=float, default=15)
     ap.add_argument('--rounds', type=int, default=3)
     ap.add_argument('--random', action='store_true', help='selftest using the -random mode')
+    ap.add_argument('--target', default='single', choices=['single', 'bech32', 'bloom', 'tables', 'prefix'],
+                    help='selftest: which search path to test (see above)')
+    ap.add_argument('--decoys', type=int, default=1000, help='selftest bloom/tables: random addresses next to the target')
     a = ap.parse_args()
     a.exes = [os.path.abspath(e) for e in a.exes]
     if a.mode == 'selftest':
-        bad = [e for e in a.exes if not (print(e) or selftest(e, a.bits, a.n, timeout=300, random=a.random))]
+        bad = [e for e in a.exes if not (print(e) or selftest(e, a.bits, a.n, timeout=300, random=a.random,
+                                                             target=a.target, decoys=a.decoys))]
         sys.exit(1 if bad else 0)
     start = (1 << 70) + (secrets.randbelow(1 << 30) << 40)
     res = {e: [] for e in a.exes}

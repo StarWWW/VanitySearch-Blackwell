@@ -51,6 +51,7 @@ std::atomic<bool> stopMonitorKey(false);
 uint64_t idxcount = 0;
 double t_Paused = 0;
 uint32_t backupThreads = 0;
+uint32_t backupStepSize = 0;
 bool randomMode = false;
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -138,7 +139,7 @@ static void onSignal(int sig) {
 }
 
 
-#define RELEASE "1.1 (VanitySearch-Bitcrack 2.2 by FixedPaul, tuned for Blackwell)"
+#define RELEASE "1.2 (VanitySearch-Bitcrack 2.2 by FixedPaul, tuned for Blackwell)"
 
 using namespace std;
 
@@ -161,7 +162,8 @@ void printUsage() {
 	printf(" -end HEX      Last private key of the range (inclusive), instead of -range\n");
 	printf(" -m N          Max hits stored per kernel launch, default 262144\n");
 	printf(" -stop         Stop when all addresses are found\n");
-	printf(" -random       Random mode: each GPU thread jumps to a random key of its slice at each step\n");
+	printf(" -random       Random mode: at each step every GPU thread jumps to the same random offset\n");
+	printf("               within its own slice of the range\n");
 	printf(" -backup       Resume a sequential search from VSbackup_gpu<N>.dat (written every 60 launches,\n");
 	printf("               on pause and on Ctrl+C). The file must belong to the same range and GPU model.\n\n");
 	printf("Addresses: compressed P2PKH (1...) or P2WPKH (bc1q...), full addresses or prefixes.\n");
@@ -217,24 +219,24 @@ static void getHexKey(const char* name, const char* v, Int& key) {
 
 void parseFile(string fileName, vector<string>& lines) {
 
-	// Get file size
-	FILE* fp = fopen(fileName.c_str(), "rb");
-	if (fp == NULL) {
+	ifstream inFile(fileName, ios::binary);
+	if (!inFile) {
 		fprintf(stderr, "[ERROR] ParseFile: cannot open %s %s\n", fileName.c_str(), strerror(errno));
 		exit(1);
 	}
-	fseek(fp, 0L, SEEK_END);
-	size_t sz = ftell(fp);
-	size_t nbAddr = sz / 33; /* Upper approximation */
-	bool loaddingProgress = sz > 100000;
-	fclose(fp);
+	inFile.seekg(0, ios::end);
+	double sz = (double)inFile.tellg();
+	inFile.seekg(0, ios::beg);
+	bool loadingProgress = sz > 100000;
+	lines.reserve(lines.size() + (size_t)(sz / 34.0)); // a P2PKH address and its line ending
 
 	// Parse file
 	int nbLine = 0;
+	double bytesRead = 0;
 	string line;
-	ifstream inFile(fileName);
-	lines.reserve(lines.size() + nbAddr);
 	while (getline(inFile, line)) {
+
+		bytesRead += (double)line.size() + 1;
 
 		// Remove ending \r\n and surrounding blanks
 		while (!line.empty() && isspace((unsigned char)line.back()))
@@ -248,14 +250,14 @@ void parseFile(string fileName, vector<string>& lines) {
 		if (line.length() > 0 && line[0] != '#') {
 			lines.push_back(line);
 			nbLine++;
-			if (loaddingProgress) {
-				if ((nbLine % 50000) == 0)
-					fprintf(stdout, "[Loading input file %5.1f%%]\r", ((double)nbLine * 100.0) / ((double)(nbAddr) * 33.0 / 34.0));
+			if (loadingProgress && (nbLine % 50000) == 0) {
+				fprintf(stdout, "[Loading input file %5.1f%%]\r", 100.0 * bytesRead / sz);
+				fflush(stdout);
 			}
 		}
 	}
 
-	if (loaddingProgress)
+	if (loadingProgress)
 		fprintf(stdout, "[Loading input file 100.0%%]\n");
 }
 
@@ -275,8 +277,7 @@ int main(int argc, char* argv[]) {
 	bool backupMode = false;
 	bool useBloom = true;
 	int searchMode = SEARCH_COMPRESSED;
-	vector<int> gpuId = { 0 };
-	vector<int> gridSize;
+	int gpuId = 0;
 	vector<string> address;
 	string outputFile = "";
 	uint32_t maxFound = 65536 * 4;
@@ -304,7 +305,7 @@ int main(int argc, char* argv[]) {
 				v = v.substr(0, comma);
 				fprintf(stdout, "[WARNING] One GPU per process, using GPU %s only. Run one instance per GPU.\n", v.c_str());
 			}
-			gpuId[0] = (int)getInt("-gpuId", v.c_str(), 0, 255);
+			gpuId = (int)getInt("-gpuId", v.c_str(), 0, 255);
 			a += 2;
 		}
 		else if (strcmp(argv[a], "-v") == 0 || strcmp(argv[a], "--version") == 0) {
@@ -380,13 +381,6 @@ int main(int argc, char* argv[]) {
 	if (backupMode && randomMode)
 		usageError("%s", "-backup resumes a sequential search, it cannot be used with -random");
 
-	if (gridSize.size() == 0) {
-		for (int i = 0; i < (int)gpuId.size(); i++) {
-			gridSize.push_back(-1);
-			gridSize.push_back(128);
-		}
-	}
-
 	// Key range
 	if (startKey.IsZero()) {
 		fprintf(stdout, "[keyspace]  0 is not a valid private key, starting at 1\n");
@@ -444,7 +438,7 @@ int main(int argc, char* argv[]) {
 	idxcount = 0;
 	t_Paused = 0;
 	backupThreads = 0;
-	string backupFile = backupFileName(gpuId[0]);
+	string backupFile = backupFileName(gpuId);
 
 	if (backupMode) {
 		BACKUP_STATE st;
@@ -468,6 +462,7 @@ int main(int argc, char* argv[]) {
 			idxcount = st.idxcount;
 			t_Paused = st.elapsed;
 			backupThreads = st.nbThread;
+			backupStepSize = st.stepSize;
 		}
 		if (idxcount > 0) {
 			fprintf(stdout, "[backup]    resuming after %llu launches (%.1f s of previous run time)\n",
@@ -504,17 +499,17 @@ int main(int argc, char* argv[]) {
 		inputThread = std::thread(monitorKeypress);
 
 	int status = SEARCH_RUNNING;
-	int nbFound = 0;
 	Pause = false;
+
+	// One search object for the whole run: a resume after a pause keeps the addresses already
+	// found, so -stop still stops once every address has been found
+	VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc);
+	v->SetUseBloom(useBloom);
 
 	while (true) {
 
 		Paused = false;
-		VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc);
-		v->SetUseBloom(useBloom);
-		status = v->Search(gpuId, gridSize);
-		nbFound += v->GetNbFound();
-		delete v;
+		status = v->Search(gpuId);
 
 		if (status != SEARCH_PAUSED)
 			break;
@@ -536,6 +531,8 @@ int main(int argc, char* argv[]) {
 	}
 	restoreTerminal();
 
+	int nbFound = v->GetNbFound();
+	delete v;
 	if (nbFound > 0)
 		fprintf(stdout, "\nFound %d key(s)%s%s\n", nbFound, outputFile.empty() ? "" : ", saved to ", outputFile.c_str());
 	fflush(stdout);

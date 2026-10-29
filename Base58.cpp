@@ -68,6 +68,8 @@ bool DecodeBase58(const char* psz, std::vector<uint8_t> &vch) {
       carry /= 256;
     }
     while (carry > 0) {
+      if (digitslen >= (int)sizeof(digits))
+        return false;   // longer than any address, would overflow digits[]
       digits[digitslen++] = (uint8_t)(carry % 256);
       carry /= 256;
     }
@@ -110,6 +112,8 @@ std::string EncodeBase58(const unsigned char* pbegin, const unsigned char* pend)
       carry /= 58;
     }
     while(carry > 0) {
+      if (digitslen >= (int)sizeof(digits))
+        return "";
       digits[digitslen++] = (unsigned char)(carry % 58);
       carry /= 58;
     }

@@ -32,6 +32,7 @@ extern std::atomic<bool> stopRequested;  // set by Ctrl+C / SIGTERM
 extern uint64_t idxcount;                // kernel launches completed (sequential progress)
 extern double t_Paused;                  // run time accumulated before this (re)start
 extern uint32_t backupThreads;           // GPU thread count recorded in the loaded backup, 0 if unknown
+extern uint32_t backupStepSize;          // keys per thread per launch recorded in the loaded backup, 0 if unknown
 extern bool randomMode;
 
 class VanitySearch;
@@ -42,10 +43,7 @@ typedef struct {
 	int  threadId;
 	std::atomic<bool> isRunning;
 	std::atomic<bool> hasStarted;
-	int  gridSizeX;
-	int  gridSizeY;
 	int  gpuId;
-	Int  THnextKey;
 
 } TH_PARAM;
 
@@ -54,7 +52,7 @@ typedef struct {
 	char* address;
 	int addressLength;
 	address_t sAddress;
-	bool* found;
+	bool found;
 
 	// For dreamer ;)
 	bool isFull;
@@ -113,21 +111,16 @@ public:
 		bool stop, std::string outputFile, uint32_t maxFound, BITCRACK_PARAM* bc);
 	~VanitySearch();
 
-	int Search(std::vector<int> gpuId, std::vector<int> gridSize);
+	// Can be called again after SEARCH_PAUSED: the found state is kept across the calls
+	int Search(int gpuId);
 	void FindKeyGPU(TH_PARAM* p);
 	int GetNbFound() { return nbFoundKey; }
 	void SetUseBloom(bool use) { useBloom = use; }
 
 private:
 
-	std::string GetHex(std::vector<unsigned char>& buffer);
 	bool checkPrivKey(std::string addr, Int& key, int32_t incr, int endomorphism, bool mode);
 	void checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t incr, int endomorphism, bool mode);
-	void checkAddrSSE(uint8_t* h1, uint8_t* h2, uint8_t* h3, uint8_t* h4,
-		int32_t incr1, int32_t incr2, int32_t incr3, int32_t incr4,
-		Int& key, int endomorphism, bool mode);
-	void checkAddresses(bool compressed, Int key, int i, Point p1);
-	void checkAddressesSSE(bool compressed, Int key, int i, Point p1, Point p2, Point p3, Point p4);
 	void output(std::string addr, std::string pAddr, std::string pAddrHex, std::string pubKey);
 
 	std::mutex outputMutex;
@@ -137,7 +130,6 @@ private:
 	void updateFound();
 	void getThreadStep(int nbThread, Int* stepThread);
 	void getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int groupSize, int numThreadsGPU, Point* publicKeys, uint64_t Progress);
-	void enumCaseUnsentiveAddress(std::string s, std::vector<std::string>& list);
 	void PrintStats(double keysDone, double speed, double ttot, double taskSize);
 	void saveBackup(int nbThread, int stepSize, double elapsed, int gpuid);
 
