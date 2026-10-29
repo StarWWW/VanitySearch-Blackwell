@@ -94,7 +94,8 @@ def main():
         return
 
     remote, default_out, desc = FILES[a.which]
-    out = a.output or default_out
+    out = os.path.abspath(a.output or default_out)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     gz_path = out + ".gz"
     url = BASE + remote
 
