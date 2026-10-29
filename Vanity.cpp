@@ -30,9 +30,14 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
-#include <ctime> 
+#include <ctime>
 #include <iostream>
 #include <fstream>
+#include <random>
+#include <stdio.h>
+#ifdef WIN64
+#include <Windows.h>
+#endif
 
 
 
@@ -53,9 +58,16 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	this->numGPUs = 0;
 	this->maxFound = maxFound;	
 	this->searchType = -1;
-	this->bc = bc;	
+	this->bc = bc;
+	this->endOfSearch = false;
+	this->searchStatus = SEARCH_RUNNING;
+	this->nbFoundKey = 0;
+	this->useBloom = true;
 
-	rseed(static_cast<unsigned long>(time(NULL)));
+	// Seeding from the clock alone gives two processes started in the same second (one per GPU)
+	// the same -random sequence
+	std::random_device rd;
+	rseed(static_cast<unsigned long>(rd() ^ (uint32_t)time(NULL) ^ ((uint32_t)rd() << 16)));
 	
 	addresses.clear();
 
@@ -73,8 +85,9 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 
 	nbAddress = 0;
 	onlyFull = true;
+	vector<string> accepted;
 
-	for (int i = 0; i < (int)inputAddresses.size(); i++) 
+	for (int i = 0; i < (int)inputAddresses.size(); i++)
 	{
 		ADDRESS_ITEM it;
 		std::vector<ADDRESS_ITEM> itAddresses;
@@ -102,6 +115,8 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 			}
 			onlyFull &= it.isFull;
 			nbAddress++;
+			if (accepted.size() < 10)
+				accepted.push_back(inputAddresses[i]);
 		}
 
 		if (loadingProgress && i % 1000 == 0)
@@ -114,7 +129,7 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	if (nbAddress == 0) 
 	{
 		fprintf(stderr, "[ERROR] VanitySearch: nothing to search !\n");
-		exit(-1);
+		exit(1);
 	}
 
 	// Second level lookup
@@ -145,7 +160,7 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 			unique_sAddress++;
 		}
 
-		if (loadingProgress)
+		if (loadingProgress && (i % 4096) == 0)
 			fprintf(stdout, "[Building lookup32 %.1f%%]\r", ((double)i * 100.0) / (double)addresses.size());
 	}
 
@@ -155,9 +170,9 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	string searchInfo = string(searchModes[searchMode]);
 	if (nbAddress < 10) 
 	{	
-		for (size_t i = 0; i < nbAddress; i++)
+		for (size_t i = 0; i < accepted.size(); i++)
 		{
-			fprintf(stdout, "Search: %s [%s]\n", inputAddresses[i].c_str(), searchInfo.c_str());
+			fprintf(stdout, "Search: %s [%s]\n", accepted[i].c_str(), searchInfo.c_str());
 		}
 	}
 	else 
@@ -196,6 +211,20 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	fflush(stdout);
 }
 
+VanitySearch::~VanitySearch() {
+
+	for (int i = 0; i < (int)usedAddress.size(); i++) {
+		vector<ADDRESS_ITEM>* items = addresses[usedAddress[i]].items;
+		if (items) {
+			for (int j = 0; j < (int)items->size(); j++)
+				delete (*items)[j].found;
+			delete items;
+			addresses[usedAddress[i]].items = NULL;
+		}
+	}
+
+}
+
 bool VanitySearch::isSingularAddress(std::string pref) {
 
 	// check is the given address contains only 1
@@ -227,8 +256,10 @@ bool VanitySearch::initAddress(std::string& address, ADDRESS_ITEM* it) {
 		aType = P2PKH;
 		break;
 	case '3':
-		aType = P2SH;
-		break;
+		// The GPU kernel hashes the compressed public key only (P2PKH / P2WPKH),
+		// a P2SH script hash can never match
+		fprintf(stdout, "Ignoring address \"%s\" (P2SH addresses are not supported, use 1... or bc1q...)\n", address.c_str());
+		return false;
 	case 'b':
 	case 'B':
 		std::transform(address.begin(), address.end(), address.begin(), ::tolower);
@@ -238,13 +269,13 @@ bool VanitySearch::initAddress(std::string& address, ADDRESS_ITEM* it) {
 	}
 
 	if (aType == -1) {
-		fprintf(stdout, "Ignoring address \"%s\" (must start with 1 or 3 or bc1q)\n", address.c_str());
+		fprintf(stdout, "Ignoring address \"%s\" (must start with 1 or bc1q)\n", address.c_str());
 		return false;
 	}
 
 	if (searchType == -1) searchType = aType;
 	if (aType != searchType) {
-		fprintf(stdout, "Ignoring address \"%s\" (P2PKH, P2SH or BECH32 allowed at once)\n", address.c_str());
+		fprintf(stdout, "Ignoring address \"%s\" (P2PKH or BECH32 allowed at once, not both)\n", address.c_str());
 		return false;
 	}
 
@@ -414,11 +445,11 @@ void VanitySearch::enumCaseUnsentiveAddress(std::string s, std::vector<std::stri
 
 void VanitySearch::output(string addr, string pAddr, string pAddrHex, std::string pubKey) {
 
-#ifdef WIN64
-	WaitForSingleObject(ghMutex, INFINITE);
-#else
-	pthread_mutex_lock(&ghMutex);
-#endif
+	std::lock_guard<std::mutex> lock(outputMutex);
+
+	// "%064s" is undefined for strings (glibc pads with spaces), pad the key explicitly
+	if (pAddrHex.length() < 64)
+		pAddrHex.insert(0, 64 - pAddrHex.length(), '0');
 
 	FILE* f = stdout;
 	bool needToClose = false;
@@ -460,23 +491,27 @@ void VanitySearch::output(string addr, string pAddr, string pAddrHex, std::strin
 	}
 
 	if (f != stdout)
-		fprintf(f, "Priv (HEX): 0x%064s\n", pAddrHex.c_str());	
-	fprintf(stdout, "Priv (HEX): 0x%064s\n", pAddrHex.c_str());
+		fprintf(f, "Priv (HEX): 0x%s\n", pAddrHex.c_str());
+	fprintf(stdout, "Priv (HEX): 0x%s\n", pAddrHex.c_str());
+
+	if (f != stdout)
+		fprintf(f, "Pub  Key  : %s\n", pubKey.c_str());
+	fprintf(stdout, "Pub  Key  : %s\n", pubKey.c_str());
+
+	if (f != stdout) {
+		char* ctimeBuff;
+		time_t now = time(NULL);
+		ctimeBuff = ctime(&now);
+		fprintf(f, "Found at  : %s", ctimeBuff);
+	}
 	fprintf(stdout, "\n");
 
 	if (f != stdout)
 		fflush(f);
 	fflush(stdout);
-	//fflush(stderr);	
 
 	if (needToClose)
 		fclose(f);
-
-#ifdef WIN64
-	ReleaseMutex(ghMutex);
-#else
-	pthread_mutex_unlock(&ghMutex);
-#endif
 }
 
 void VanitySearch::updateFound() {
@@ -544,6 +579,8 @@ bool VanitySearch::checkPrivKey(string addr, Int& key, int32_t incr, int endomor
 			fprintf(stdout, "  Addr :%s\n", addr.c_str());
 			fprintf(stdout, "  Check:%s\n", chkAddr.c_str());
 			fprintf(stdout, "  Endo:%d incr:%d comp:%d\n", endomorphism, incr, mode);
+			// The GPU hash matched: print the candidate so that an external check can still use it
+			fprintf(stdout, "  CandKey: %s\n", k.GetBase16().c_str());
 			return false;
 		}
 
@@ -606,7 +643,9 @@ void VanitySearch::checkAddrSSE(uint8_t* h1, uint8_t* h2, uint8_t* h3, uint8_t* 
 
 void VanitySearch::checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t incr, int endomorphism, bool mode) {
 	
-	vector<ADDRESS_ITEM>* pi = addresses[prefIdx].items;	
+	vector<ADDRESS_ITEM>* pi = addresses[prefIdx].items;
+	if (pi == NULL)
+		return;
 
 
 	if (onlyFull) {
@@ -663,16 +702,6 @@ void VanitySearch::checkAddr(int prefIdx, uint8_t* hash160, Int& key, int32_t in
 
 }
 
-#ifdef WIN64
-DWORD WINAPI _FindKeyGPU(LPVOID lpParam) {
-#else
-void* _FindKeyGPU(void* lpParam) {
-#endif
-	TH_PARAM* p = (TH_PARAM*)lpParam;
-	p->obj->FindKeyGPU(p);
-	return 0;
-}
-
 void VanitySearch::checkAddresses(bool compressed, Int key, int i, Point p1) {
 
 	unsigned char h0[20];
@@ -717,20 +746,30 @@ void VanitySearch::checkAddressesSSE(bool compressed, Int key, int i, Point p1, 
 		checkAddr(pr3, h3, key, i + 3, 0, compressed);	
 }
 
+// Keys per GPU thread. Rounded up so that the last (taskSize mod nbThread) keys of the range
+// are scanned too; with a power-of-two range and thread count it is an exact division.
+void VanitySearch::getThreadStep(int nbThread, Int* stepThread) {
+
+	Int numthread;
+	Int rem;
+
+	stepThread->Set(&bc->ksFinish);
+	stepThread->Sub(&bc->ksStart);
+	stepThread->AddOne();
+	numthread.SetInt32(nbThread);
+	stepThread->Div(&numthread, &rem);
+	if (!rem.IsZero())
+		stepThread->AddOne();
+}
+
 void VanitySearch::getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int groupSize, int nbThread, Point *p, uint64_t Progress) {
-		
+
 	uint32_t grp_startkeys = nbThread/256;
 
 	//New setting key by fixedpaul using addition on secp with batch modular inverse, super fast, multithreading not needed
 
 	Int stepThread;
-	Int numthread;
-
-	stepThread.Set(&bc->ksFinish);
-	stepThread.Sub(&bc->ksStart);
-	stepThread.AddOne();
-	numthread.SetInt32(nbThread);
-	stepThread.Div(&numthread);
+	getThreadStep(nbThread, &stepThread);
 
 	Point Pdouble;
 	Int kDouble;
@@ -739,19 +778,16 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int grou
 	kDouble.Mult(grp_startkeys);
 	Pdouble = secp->ComputePublicKey(&kDouble);
 
-	Point P_start;
 	Int kStart;
 
 	kStart.Set(&stepThread);
 	kStart.Mult(grp_startkeys / 2);
 	kStart.Add(groupSize / 2 + Progress);
+	kStart.Add(&tRangeStart);
 
-	
-
-	P_start = secp->ComputePublicKey(&kStart);
-
-	p[grp_startkeys / 2] = secp->ComputePublicKey(&tRangeStart);
-	p[grp_startkeys / 2] = secp->AddDirect(p[grp_startkeys / 2], P_start);
+	// Computed directly rather than as P(start) + P(offset): an affine addition cannot handle
+	// the point at infinity (start = 0) nor two equal points
+	p[grp_startkeys / 2] = secp->ComputePublicKey(&kStart);
 
 
 	Int key_delta;
@@ -760,7 +796,7 @@ void VanitySearch::getGPUStartingKeys(Int& tRangeStart, Int& tRangeEnd, int grou
 
 	key_delta.Set(&stepThread);
 
-	
+
 
 	p_delta[0] = secp->ComputePublicKey(&key_delta);
 	key_delta.Add(&stepThread);
@@ -886,16 +922,32 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	bool ok = true;
 
 	double t0;
-	double ttot;
-	uint64_t keys_n = 0;
-	static uint64_t keys_n_prev = 0;
-	static double tprev = 0.0;
+	double ttot = t_Paused;
 
 	// Global init
-	int thId = ph->threadId;
 	GPUEngine g(ph->gpuId, maxFound);
+	if (!g.IsInitialised()) {
+		fprintf(stderr, "[ERROR] GPU #%d initialisation failed\n", ph->gpuId);
+		searchStatus = SEARCH_ERROR;
+		endOfSearch = true;
+		ph->isRunning = false;
+		return;
+	}
+
 	int numThreadsGPU = g.GetNbThread();
 	int STEP_SIZE = g.GetStepSize();
+
+	// A backup only maps to the same key layout: same range (checked when loaded) and thread count
+	if (!randomMode && backupThreads != 0 && backupThreads != (uint32_t)numThreadsGPU) {
+		fprintf(stderr, "[ERROR] The backup was made with %u GPU threads, this GPU runs %d. The progress cannot be\n"
+			"        mapped to this GPU: resume on the original GPU model or start again without -backup.\n",
+			backupThreads, numThreadsGPU);
+		searchStatus = SEARCH_ERROR;
+		endOfSearch = true;
+		ph->isRunning = false;
+		return;
+	}
+
 	Point* publicKeys = new Point[numThreadsGPU];
 	vector<ITEM> found;
 
@@ -906,160 +958,179 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 	RandomJump_K.SetInt32(STEP_SIZE);
 	RandomJump_K_last.SetInt32(0);
 	RandomJump_K_tot.SetInt32(0);
-	bool kneg = false;
 
 	fprintf(stdout, "GPU: %s\n", g.deviceName.c_str());
 	fflush(stdout);
 
-	counters[thId] = 0;
-	
 	g.SetSearchMode(searchMode);
 	g.SetSearchType(searchType);
-	if (onlyFull) {
-		g.SetAddress(usedAddressL, nbAddress);
-		if (nbAddress == 1) {
-			for (int i = 0; i < (int)addresses.size(); i++) {
-				if (addresses[i].items) {
-					g.SetSingleTarget((*addresses[i].items)[0].hash160);
-					break;
-				}
+	if (onlyFull && nbAddress == 1) {
+		for (int i = 0; i < (int)addresses.size(); i++) {
+			if (addresses[i].items) {
+				ok = g.SetSingleTarget((*addresses[i].items)[0].hash160);
+				break;
 			}
 		}
 	}
+	else if (onlyFull && useBloom) {
+		// The bloom filter replaces the 16/32-bit tables, which saturate with many addresses
+		vector<const uint8_t*> hashes;
+		hashes.reserve(nbAddress);
+		for (int i = 0; i < (int)usedAddress.size(); i++) {
+			vector<ADDRESS_ITEM>* items = addresses[usedAddress[i]].items;
+			for (int j = 0; j < (int)items->size(); j++)
+				hashes.push_back((*items)[j].hash160);
+		}
+		ok = g.SetBloom(hashes);
+	}
+	else if (onlyFull) {
+		ok = g.SetAddress(usedAddressL, nbAddress);
+	}
 	else {
-		g.SetAddress(usedAddress);
+		ok = g.SetAddress(usedAddress);
 	}
 
 	Int stepThread;
 	Int taskSize;
-	Int numthread;
 
 	taskSize.Set(&bc->ksFinish);
 	taskSize.Sub(&bc->ksStart);
 	taskSize.AddOne();
-	numthread.SetInt32(numThreadsGPU);
-	stepThread.Set(&taskSize);
-	stepThread.Div(&numthread);
+	getThreadStep(numThreadsGPU, &stepThread);
 
 	Int privkey;
 	Int part_key;
 	Int keycount;
+	Int threadDone;
 
 	t0 = Timer::get_tick();
 
-	getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, (uint64_t)(1ULL * idxcount * g.GetStepSize()));
-
-	ok = g.SetKeys(publicKeys);
+	// In -random mode the reported keys do not include a sequential offset, so none may be applied
+	uint64_t progress = randomMode ? 0 : idxcount * (uint64_t)STEP_SIZE;
+	if (ok) {
+		getGPUStartingKeys(bc->ksStart, bc->ksFinish, g.GetGroupSize(), numThreadsGPU, publicKeys, progress);
+		ok = g.SetKeys(publicKeys);
+	}
 	delete[] publicKeys;
 
-	ttot = Timer::get_tick() - t0;
-
-
-	printf("Starting keys set in %.2f seconds \n", ttot);
+	printf("Starting keys set in %.2f seconds \n", Timer::get_tick() - t0);
 	fflush(stdout);
 
 	ph->hasStarted = true;
 
-	printf("GPU Started ! \r");
-	fflush(stdout);
+	if (ok) {
+		printf("GPU Started ! \r");
+		fflush(stdout);
+	}
 
 	t0 = Timer::get_tick();
 
-	endOfSearch = false;
-
+	double keysPerLaunch = (double)STEP_SIZE * (double)numThreadsGPU;
+	double keysDone = keysPerLaunch * (double)idxcount;
+	double keysPrev = keysDone;
+	double tprev = ttot;
+	double speedAvg = 0.0;
+	uint64_t launches = 0;
 
 	while (ok && !endOfSearch) {
 
-		if (!Pause) {	
+		if (stopRequested) {
+			searchStatus = SEARCH_STOPPED;
+			break;
+		}
 
+		if (Pause) {
+			printf("\nPausing...\n");
+			fflush(stdout);
+			// The kernel in flight is not counted, it is scanned again on resume
+			t_Paused = ttot;
+			if (!randomMode)
+				saveBackup(numThreadsGPU, STEP_SIZE, ttot, ph->gpuId);
+			g.FreeGPUEngine();
+			printf("Paused (GPU released) - press p to resume, Ctrl+C to quit\n");
+			fflush(stdout);
+			searchStatus = SEARCH_PAUSED;
+			Paused = true;
+			break;
+		}
+
+		if (randomMode) {
+			RandomJump_K_last.Set(&RandomJump_K);
+			RandomJump_K_tot.Add(&RandomJump_K);
+
+			RandomJump_K.Rand(256);
+			RandomJump_K.Mod(&stepThread);
+			RandomJump_K.Sub(&RandomJump_K_tot);
+
+			if (RandomJump_K.IsNegative()) {
+				RandomJump_K.Neg();
+				RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
+				RandomJump_P.y.ModNeg();
+				RandomJump_K.Neg();
+			}
+			else {
+				RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
+			}
+
+			ok = g.SetRandomJump(RandomJump_P);
+			if (!ok) break;
+		}
+
+		ok = g.Launch(found, true);
+		if (!ok) break;
+		idxcount += 1;
+		launches++;
+
+		ttot = Timer::get_tick() - t0 + t_Paused;
+
+		// Offset of the kernel that just completed, within each thread's slice
+		keycount.SetInt32(0);
+		keycount.Add((uint64_t)(idxcount - 1));
+		keycount.Mult(STEP_SIZE);
+
+		for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
+
+			ITEM it = found[i];
+			part_key.Set(&stepThread);
+			part_key.Mult(it.thId);
+
+			privkey.Set(&bc->ksStart);
+			privkey.Add(&part_key);
 
 			if (randomMode) {
-				RandomJump_K_last.Set(&RandomJump_K);
-				RandomJump_K_tot.Add(&RandomJump_K);
-
-				RandomJump_K.Rand(256);
-				RandomJump_K.Mod(&stepThread);
-				RandomJump_K.Sub(&RandomJump_K_tot);
-				
-				if (RandomJump_K.IsNegative()) {
-					RandomJump_K.Neg();
-					RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
-					RandomJump_P.y.ModNeg();
-					RandomJump_K.Neg();
-				}
-				else {
-					RandomJump_P = secp->ComputePublicKey(&RandomJump_K);
-				}
-				
-				ok = g.SetRandomJump(RandomJump_P);
+				privkey.Add(&RandomJump_K_tot);
+				privkey.Sub(&RandomJump_K_last);
+			}
+			else {
+				privkey.Add(&keycount);
 			}
 
-			ok = g.Launch(found, true);
-			idxcount += 1;
-
-			if (!randomMode && idxcount%60==0) {
-				
-				saveBackup(idxcount, ttot, ph->gpuId);
-			}
-			//printf("\n rnd: %s  idx:  %d \n", RandomJump_K_tot.GetBase10().c_str(), idxcount);
-
-			ttot = Timer::get_tick() - t0 + t_Paused;
-
-			keycount.SetInt32(idxcount - 1);
-			keycount.Mult(STEP_SIZE);
-
-
-			for (int i = 0; i < (int)found.size() && !endOfSearch; i++) {
-
-				ITEM it = found[i];
-				part_key.Set(&stepThread);
-				part_key.Mult(it.thId);
-	
-				privkey.Set(&bc->ksStart);
-				privkey.Add(&part_key);
-
-				if (randomMode) {
-					privkey.Add(&RandomJump_K_tot);
-					privkey.Sub(&RandomJump_K_last);
-				}
-				else {				
-					privkey.Add(&keycount);
-				}
-			
-				checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
-			}
-
-			keycount.Add(STEP_SIZE);
-			keycount.Mult(numThreadsGPU);
-
-			keys_n = 1ULL * STEP_SIZE * numThreadsGPU;
-			keys_n = keys_n * idxcount;
-		
-			
-
-			
-
-		} else {
-			printf("Pausing...\r");
-			fflush(stdout);
-
-			g.FreeGPUEngine();
-
-			Paused = true;
-			t_Paused = ttot;
+			checkAddr(*(address_t*)(it.hash), it.hash, privkey, it.incr, it.endo, it.mode);
 		}
-		
 
-		PrintStats(keys_n, keys_n_prev, ttot, tprev, taskSize, keycount);
+		if (!randomMode && idxcount % 60 == 0)
+			saveBackup(numThreadsGPU, STEP_SIZE, ttot, ph->gpuId);
 
-		
+		keysDone = keysPerLaunch * (double)idxcount;
+		double speed = 0.0;
+		if (ttot > tprev)
+			speed = (keysDone - keysPrev) / (ttot - tprev) / 1000000.0; // speed in Mkey/s
+		// The first launch also includes the start-up, leave it out of the average
+		if (launches > 1)
+			speedAvg = (speedAvg == 0.0) ? speed : 0.9 * speedAvg + 0.1 * speed;
+		PrintStats(keysDone, (speedAvg > 0.0) ? speedAvg : speed, ttot, taskSize.ToDouble());
+		keysPrev = keysDone;
+		tprev = ttot;
 
-		if (keycount.IsGreaterOrEqual(&taskSize) && (!randomMode))
+		// Each thread scans its own slice of stepThread keys
+		threadDone.SetInt32(0);
+		threadDone.Add((uint64_t)idxcount);
+		threadDone.Mult(STEP_SIZE);
+		if (!randomMode && threadDone.IsGreaterOrEqual(&stepThread))
 		{
-			double avg_speed = static_cast<double>(keys_n) / (ttot * 1000000.0); // Avg speed in MK/s
+			double avg_speed = (ttot > 0.0) ? keysDone / (ttot * 1000000.0) : 0.0; // Avg speed in MK/s
 			printf("\n");
-			printf("Range Finished! - Average Speed: %.1f [MK/s] - Found: %d   \r", avg_speed, nbFoundKey);
-			printf("\n");
+			printf("Range Finished! - Average Speed: %.1f [MK/s] - Found: %d   \n", avg_speed, nbFoundKey);
 			fflush(stdout);
 
 			char* ctimeBuff;
@@ -1067,214 +1138,232 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 			ctimeBuff = ctime(&now);
 			printf("Current task END time: %s", ctimeBuff);
 
+			saveBackup(numThreadsGPU, STEP_SIZE, ttot, ph->gpuId);
+			searchStatus = SEARCH_FINISHED;
 			endOfSearch = true;
-
-			
-
 		}
-
-		keys_n_prev = keys_n;
-		tprev = ttot ;
-
 	}
 
-
-	
-
-	ph->isRunning = false;
+	if (!ok) {
+		fprintf(stderr, "\n[ERROR] GPU #%d failed, search aborted\n", ph->gpuId);
+		searchStatus = SEARCH_ERROR;
+	}
+	else if (searchStatus == SEARCH_STOPPED) {
+		printf("\nStopped by user.\n");
+		if (!randomMode) {
+			saveBackup(numThreadsGPU, STEP_SIZE, ttot, ph->gpuId);
+			printf("Progress saved to %s, resume with -backup\n", backupFileName(ph->gpuId).c_str());
+		}
+	}
+	else if (searchStatus == SEARCH_RUNNING && endOfSearch) {
+		// -stop and every address has been found
+		if (!randomMode)
+			saveBackup(numThreadsGPU, STEP_SIZE, ttot, ph->gpuId);
+		searchStatus = SEARCH_ALL_FOUND;
+	}
+	t_Paused = ttot;
+	fflush(stdout);
 
 	endOfSearch = true;
+	ph->isRunning = false;
 }
 
 
-void VanitySearch::PrintStats(uint64_t keys_n, uint64_t keys_n_prev, double ttot, double tprev, Int taskSize, Int keycount) {
+static void formatDuration(char* buf, size_t len, double t) {
 
-	double speed;
-	double perc;
-	double log_keys;
-	double bkeys;
-
-	Int Perc;
-
-	Perc.Set(&taskSize);
-	Perc.Mult(65536);
-	Perc.Div(&keycount);
-
-
-	if (ttot > tprev) {
-		speed = (keys_n - keys_n_prev) / (ttot - tprev) / 1000000.0; // speed in Mkey/s
+	if (!(t >= 0.0) || t > 3.15e13) {             // negative, NaN or beyond a million years
+		snprintf(buf, len, "--:--:--");
+		return;
 	}
+	double years = t / (365.25 * 86400.0);
+	if (years >= 100.0) {
+		snprintf(buf, len, "%.3g years", years);
+		return;
+	}
+	uint64_t s = (uint64_t)t;
+	uint64_t d = s / 86400;
+	int h = (int)((s % 86400) / 3600);
+	int m = (int)((s % 3600) / 60);
+	int sec = (int)(s % 60);
+	if (d > 0)
+		snprintf(buf, len, "%llud %02d:%02d:%02d", (unsigned long long)d, h, m, sec);
+	else
+		snprintf(buf, len, "%02d:%02d:%02d", h, m, sec);
+}
 
+void VanitySearch::PrintStats(double keysDone, double speed, double ttot, double taskSize) {
 
-	perc = (double)(1 / Perc.ToDouble()*100*65536);
+	double perc = (taskSize > 0.0) ? 100.0 * keysDone / taskSize : 0.0;
+	// The last launch can run past the end of a small range
+	if (!randomMode && perc > 100.0)
+		perc = 100.0;
+	double log_keys = (keysDone >= 1.0) ? log2(keysDone) : 0.0;
+	double bkeys = keysDone / 1000000000.0;
 
-
-	log_keys = log2(static_cast<double>(keys_n));
-	bkeys = static_cast<double>(keys_n);
-	bkeys = bkeys / 1000000000;
-
-	int h_run = static_cast<int32_t>(ttot) / 3600;
-	int m_run = (static_cast<int32_t>(ttot) % 3600) / 60;
-	int s_run = static_cast<int32_t>(ttot) % 60;
-	int d_run = static_cast<int32_t>(ttot * 10) % 10;
-
-	double tempo_tot_stimato = ttot / (perc / 100.0);
-	double end_tt = tempo_tot_stimato - ttot;
-
-	int h_end = static_cast<int32_t>(end_tt) / 3600;
-	int m_end = (static_cast<int32_t>(end_tt) % 3600) / 60;
-	int s_end = static_cast<int32_t>(end_tt) % 60;
-	int d_end = static_cast<int32_t>(end_tt * 10) % 10;
-
-
+	char run[64];
+	formatDuration(run, sizeof(run), ttot);
 
 	if (randomMode) {
-		if (!Paused) {
-
-			printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d - Found: %d     ",
-				speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
-
-		}
-		else {
-			printf("Paused - %.0f Bkeys -  2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d - Found: %d     ",
-				bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
-
-			endOfSearch = true;
-		}
+		printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %s - Found: %d     ",
+			speed, bkeys, log_keys, perc, run, nbFoundKey);
 	}
 	else {
-		if (!Paused) {
-
-			if (h_end >= 0)
-				printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
-					speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, h_end, m_end, s_end, d_end, nbFoundKey);
-			else
-				printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: Too much bro - Found: %d     ",
-					speed, bkeys, log_keys, perc, h_run, m_run, s_run, d_run, nbFoundKey);
-		}
-		else {
-			printf("Paused - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %02d:%02d:%02d.%01d|END: %02d:%02d:%02d.%01d - Found: %d     ",
-				bkeys,log_keys, perc, h_run, m_run, s_run, d_run, h_end, m_end, s_end, d_end, nbFoundKey);
-
-			endOfSearch = true;
-		}
+		char end[64];
+		double left = taskSize - keysDone;
+		if (left < 0.0) left = 0.0;
+		formatDuration(end, sizeof(end), (speed > 0.0) ? left / (speed * 1000000.0) : -1.0);
+		printf("%.1f MK/s - %.0f BKeys - 2^%.2f [%.2f%%] - RUN: %s|END: %s - Found: %d     ",
+			speed, bkeys, log_keys, perc, run, end, nbFoundKey);
 	}
 
-
 	printf("\r");
-
-
 	fflush(stdout);
 }
 
 
-void VanitySearch::saveBackup(int idxcount, double t_Paused, int gpuid) {
-	std::string filename = "VSbackup_gpu" + std::to_string(gpuid) + ".dat";
-	std::ofstream outFile(filename, std::ios::binary);
-	if (outFile) {
-		outFile.write(reinterpret_cast<const char*>(&idxcount), sizeof(idxcount));
-		outFile.write(reinterpret_cast<const char*>(&t_Paused), sizeof(t_Paused));
-		outFile.close();
-	}
-	else {
-		std::cerr << "Error opening file for writing: " << filename << "\n";
-	}
+// ----------------------------------------------------------------------------
+// Backup file
+
+static const char BACKUP_MAGIC[8] = { 'V','S','B','A','C','K','2','\n' };
+
+std::string backupFileName(int gpuId) {
+	return "VSbackup_gpu" + std::to_string(gpuId) + ".dat";
 }
 
-bool VanitySearch::isAlive(TH_PARAM * p) {
-
-	bool isAlive = true;
-	int total = numGPUs;
-	for (int i = 0; i < total; i++)
-		isAlive = isAlive && p[i].isRunning;
-
-	return isAlive;
+static void writeKey(std::ofstream& f, const Int& k) {
+	for (int i = 0; i < 4; i++)
+		f.write(reinterpret_cast<const char*>(&k.bits64[i]), sizeof(uint64_t));
 }
 
-bool VanitySearch::hasStarted(TH_PARAM * p) {
-
-	bool hasStarted = true;
-	int total = numGPUs;
-	for (int i = 0; i < total; i++)
-		hasStarted = hasStarted && p[i].hasStarted;
-
-	return hasStarted;
+static void readKey(std::ifstream& f, Int& k) {
+	k.SetInt32(0);
+	for (int i = 0; i < 4; i++)
+		f.read(reinterpret_cast<char*>(&k.bits64[i]), sizeof(uint64_t));
 }
 
-uint64_t VanitySearch::getGPUCount() {
+bool readBackup(const std::string& fileName, BACKUP_STATE* st) {
 
-	uint64_t count = 0;
-	for (int i = 0; i < numGPUs; i++) {
-		count += counters[i];
-	}
-	return count;
-}
+	std::ifstream f(fileName, std::ios::binary);
+	if (!f)
+		return false;
 
-void VanitySearch::saveProgress(TH_PARAM* p, Int& lastSaveKey, BITCRACK_PARAM* bc) {
+	f.seekg(0, std::ios::end);
+	std::streamoff size = f.tellg();
+	f.seekg(0, std::ios::beg);
 
-	Int lowerKey;
-	lowerKey.Set(&p[0].THnextKey);
+	st->legacy = false;
+	st->nbThread = 0;
+	st->stepSize = 0;
+	st->start.SetInt32(0);
+	st->finish.SetInt32(0);
 
-	int total = numGPUs;
-	for (int i = 0; i < total; i++) {
-		if (p[i].THnextKey.IsLower(&lowerKey))
-			lowerKey.Set(&p[i].THnextKey);
+	if (size == (std::streamoff)(sizeof(int32_t) + sizeof(double))) {
+		// Original VanitySearch-Bitcrack format: int idxcount, double time
+		int32_t idx = 0;
+		f.read(reinterpret_cast<char*>(&idx), sizeof(idx));
+		f.read(reinterpret_cast<char*>(&st->elapsed), sizeof(st->elapsed));
+		if (!f || idx < 0)
+			return false;
+		st->idxcount = (uint64_t)idx;
+		st->legacy = true;
+		return true;
 	}
 
-	if (lowerKey.IsLowerOrEqual(&lastSaveKey)) return;
-	lastSaveKey.Set(&lowerKey);
+	char magic[8];
+	f.read(magic, sizeof(magic));
+	if (!f || memcmp(magic, BACKUP_MAGIC, sizeof(magic)) != 0)
+		return false;
+	f.read(reinterpret_cast<char*>(&st->idxcount), sizeof(st->idxcount));
+	f.read(reinterpret_cast<char*>(&st->elapsed), sizeof(st->elapsed));
+	readKey(f, st->start);
+	readKey(f, st->finish);
+	f.read(reinterpret_cast<char*>(&st->nbThread), sizeof(st->nbThread));
+	f.read(reinterpret_cast<char*>(&st->stepSize), sizeof(st->stepSize));
+	return (bool)f;
 }
 
-void VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
+bool writeBackup(const std::string& fileName, const BACKUP_STATE* st) {
 
-	//double t0;
-	//double t1;
+	// Written next to the target and renamed over it, so an interrupted write never leaves a
+	// truncated backup behind
+	std::string tmp = fileName + ".tmp";
+	{
+		std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+		if (!f)
+			return false;
+		f.write(BACKUP_MAGIC, sizeof(BACKUP_MAGIC));
+		f.write(reinterpret_cast<const char*>(&st->idxcount), sizeof(st->idxcount));
+		f.write(reinterpret_cast<const char*>(&st->elapsed), sizeof(st->elapsed));
+		writeKey(f, st->start);
+		writeKey(f, st->finish);
+		f.write(reinterpret_cast<const char*>(&st->nbThread), sizeof(st->nbThread));
+		f.write(reinterpret_cast<const char*>(&st->stepSize), sizeof(st->stepSize));
+		f.flush();
+		if (!f)
+			return false;
+	}
+
+#ifdef WIN64
+	return MoveFileExA(tmp.c_str(), fileName.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+	return rename(tmp.c_str(), fileName.c_str()) == 0;
+#endif
+}
+
+void VanitySearch::saveBackup(int nbThread, int stepSize, double elapsed, int gpuid) {
+
+	BACKUP_STATE st;
+	st.idxcount = idxcount;
+	st.elapsed = elapsed;
+	st.start.Set(&bc->ksStart);
+	st.finish.Set(&bc->ksFinish);
+	st.nbThread = (uint32_t)nbThread;
+	st.stepSize = (uint32_t)stepSize;
+	st.legacy = false;
+
+	std::string filename = backupFileName(gpuid);
+	if (!writeBackup(filename, &st))
+		std::cerr << "\nError writing backup file: " << filename << "\n";
+}
+
+static void _FindKeyGPUThread(TH_PARAM* p) {
+	p->obj->FindKeyGPU(p);
+}
+
+int VanitySearch::Search(std::vector<int> gpuId, std::vector<int> gridSize) {
+
 	endOfSearch = false;
-	/*numGPUs = ((int)gpuId.size());*/
+	searchStatus = SEARCH_RUNNING;
+	// One GPU per process: run one instance per GPU with its own -gpuId and range
 	numGPUs = 1;
 	nbFoundKey = 0;
 
-	memset(counters, 0, sizeof(counters));	
-
-	TH_PARAM* params = (TH_PARAM*)malloc(numGPUs * sizeof(TH_PARAM));
-	memset(params, 0, numGPUs * sizeof(TH_PARAM));
-	
+	TH_PARAM* params = new TH_PARAM[numGPUs]();
 	std::thread* threads = new std::thread[numGPUs];
-
-#ifdef WIN64
-	ghMutex = CreateMutex(NULL, FALSE, NULL);
-	mutex = CreateMutex(NULL, FALSE, NULL);
-#else
-	ghMutex = PTHREAD_MUTEX_INITIALIZER;
-	mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
 
 	// Launch GPU threads
 	for (int i = 0; i < numGPUs; i++) {
 		params[i].obj = this;
 		params[i].threadId = i;
 		params[i].isRunning = true;
+		params[i].hasStarted = false;
 		params[i].gpuId = gpuId[i];
-		params[i].gridSizeX = gridSize[i];
-		params[i].gridSizeY = gridSize[i+1];
+		params[i].gridSizeX = gridSize[2 * i];
+		params[i].gridSizeY = gridSize[2 * i + 1];
 		params[i].THnextKey.Set(&bc->ksNext);
-		
-		threads[i] = std::thread(_FindKeyGPU, params + i);
+
+		threads[i] = std::thread(_FindKeyGPUThread, params + i);
 	}
 
-	while (!hasStarted(params)) {
-		Timer::SleepMillis(500);
-	}
+	// The GPU thread owns the engine and releases it before returning, joining it guarantees
+	// that the GPU is free again (pause) and that nothing still touches params
+	for (int i = 0; i < numGPUs; i++)
+		threads[i].join();
 
-	while (!endOfSearch) {
-		Timer::SleepMillis(100);
-	}
+	delete[] threads;
+	delete[] params;
 
-	
-	if (params != nullptr) {
-		free(params);
-	}
-
+	return searchStatus;
 }
 
 string VanitySearch::GetHex(vector<unsigned char> &buffer) {

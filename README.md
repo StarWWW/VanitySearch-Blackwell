@@ -4,9 +4,9 @@ Based on [FixedPaul/VanitySearch-Bitcrack](https://github.com/FixedPaul/VanitySe
 which is in turn based on [Jean-Luc Pons' VanitySearch](https://github.com/JeanLucPons/VanitySearch). It is
 tuned for NVIDIA Blackwell GPUs (sm_120) through profiling.
 
-The tool searches a private-key range for a compressed P2PKH address. The command line is unchanged
-from upstream, see [README.upstream.md](README.upstream.md). The GPU kernel needs **10.8% fewer SM
-cycles per key**, and every change was A/B measured and verified.
+The tool searches a private-key range for a compressed P2PKH (`1...`) or P2WPKH (`bc1q...`) address
+or prefix. The command line is upstream's plus a few additions (see [Usage](#usage)). The GPU kernel
+needs **10.8% fewer SM cycles per key**, and every change was A/B measured and verified.
 
 | GPU | Original | VanitySearch-Blackwell |
 |---|---|---|
@@ -31,6 +31,66 @@ and a better launch shape.
 * Tooling is added: a Windows build script, a planted-key self-test, A/B and Nsight Compute
   cycle benchmarks, and pipe microbenchmarks (`bench/`).
 * The Makefile now defaults to sm_120 and a current GCC/CUDA toolchain.
+
+### Fixes in v1.1
+
+* The kernel no longer writes past the hit buffer when one launch finds more than `-m` hits.
+  Prefix searches could corrupt GPU memory before.
+* Without `-start`, the search began at key 0, and keys at the start of the range were missed.
+  It now starts at 1.
+* Pause and resume (`p`) freed the GPU buffers twice and raced the GPU thread (use after free).
+  In `-random` mode, every key found after a resume was reported wrongly and discarded.
+* The backup is written atomically. It records the range and the GPU layout, and resuming on another
+  range or GPU model is refused instead of silently skipping keys. Old backup files still load.
+* On Linux, the terminal is no longer left without echo, or with a non-blocking stdin, when the
+  tool exits on an error or Ctrl+C. Background jobs and piped stdin no longer touch the terminal.
+* The arguments are validated: bad hex, missing values and out-of-range numbers now give an error
+  instead of a crash or silent garbage.
+* Other fixes: the `-random` seed differs per process; an invalid `-gpuId` gives an error instead of
+  hanging; Blackwell core counts are shown; the private key is zero-padded on every platform; the
+  progress and ETA no longer show `51200%` or negative times; P2SH (`3...`) addresses, which the
+  kernel cannot match, are rejected with a message.
+
+### Multi-address search (bloom filter)
+
+Pass several full addresses (on the command line or with `-i file`) and the GPU tests every key against a
+bloom filter of their hash160s. The filter uses 32–64 bits per address and 8 probes, so most keys cost
+about 1.2 memory reads. The CPU then removes the rare false positives (rate 4·10⁻⁸ to 6·10⁻⁶). One
+address still uses the constant-memory fast path, and prefixes still use the lookup tables. Measured on
+an RTX 5050 Laptop, a 2^34 range with 5 planted keys hidden among random addresses:
+
+| Addresses | Bloom filter | Old 16/32-bit tables (`-nobloom`) |
+|---|---|---|
+| 1 | 1173 MK/s (single-target path) | same |
+| 1,000,005 | 1143 MK/s (4 MB filter), 5/5 found | 1090 MK/s, 5/5 found |
+| 10,000,005 | 1099 MK/s (64 MB filter), 5/5 found | 967 MK/s, **1/5 found** (988,345 hits lost) |
+
+With 10M addresses the old tables pass about 0.2% of all keys to the CPU, so the hit buffer
+overflows and real hits are dropped. The bloom filter passes about 72 per launch.
+
+## Usage
+
+```
+vanitysearch [-gpuId N] [-start HEX] [-range BITS | -end HEX] [-stop] [-random] [-backup]
+             [-i file] [-o file] [-m N] address...
+```
+
+| Option | |
+|---|---|
+| `-start HEX` | First private key, default 1. A `0x` prefix is accepted. |
+| `-range BITS` | Scan `start` … `start + 2^BITS − 1` (default 30). |
+| `-end HEX` | **New:** last key (inclusive), for ranges that are not a power of two. |
+| `-stop` | Stop once every address has been found. |
+| `-random` | Each GPU thread jumps to a random key in its slice at every step. |
+| `-backup` | Resume from `VSbackup_gpu<N>.dat`. The file is written every 60 launches, on pause, on Ctrl+C and at the end. A new run without `-backup` keeps the previous file as `.prev`. |
+| `-i file` / `-o file` | Addresses to search (one per line, `#` comments) / file the found keys are appended to (with public key and time). |
+| `-nobloom` | **New:** use the old 16/32-bit tables instead of the bloom filter for several full addresses. |
+| `-gpuId N` | GPU to use. One GPU per process: run one instance per GPU. |
+| `-l` | **New:** list the CUDA devices. |
+| `-h`, `-v` | Help, version. |
+
+While running, `p` pauses and releases the GPU, and `p` again resumes. **Ctrl+C** saves the progress
+and exits (a second Ctrl+C exits at once). The exit code is 1 on errors and 0 otherwise.
 
 ## Build
 
@@ -60,8 +120,9 @@ reported key's address in pure Python, independently of the tool.
 ## Google Colab
 
 [`colab/puzzle71_blackwell.ipynb`](colab/puzzle71_blackwell.ipynb) is a self-contained notebook.
-Its UI is in Turkish. It builds upstream VanitySearch-Bitcrack plus this project's GPU changes (embedded
-as a patch) for the attached GPU and runs a self-test before searching. Found keys are checked
+Its UI is in Turkish. It clones this repository (`VS_REPO` / `VS_REF`, which can also be a local
+clone), builds it for the attached GPU and runs a self-test before searching. If the self-test fails, it
+falls back to the original FixedPaul source from this repository's first commit. Found keys are checked
 independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
 realistic odds up front. The same notebook also runs outside Colab, in any Jupyter on Linux (apt-based
 CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in

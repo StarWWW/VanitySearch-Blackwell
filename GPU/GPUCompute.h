@@ -30,6 +30,13 @@
 // instead of going through the 128KB prefix table (one global load per key).
 __device__ __constant__ uint32_t _singleTarget = 0;
 __device__ __constant__ uint32_t _targetH160[5];
+// Capacity of the output buffer in items: hits past it are counted but not written.
+__device__ __constant__ uint32_t _maxFound = 0;
+// Multi full-address search: bloom filter over the hash160 (_bloomK probes, 0 = off).
+// Probe i tests bit (h[0] + i*(h[1]|1)) & _bloomMask; the CPU removes the false positives.
+__device__ __constant__ uint32_t _bloomK = 0;
+__device__ __constant__ uint32_t _bloomMask;
+__device__ __constant__ const uint32_t *_bloomBits;
 
 #ifndef CHECK_INLINE
 #define CHECK_INLINE __forceinline__
@@ -51,6 +58,17 @@ __device__ CHECK_INLINE void CheckPoint(uint32_t *_h, int32_t incr, address_t *a
     if (_singleTarget) {
         if (_h[0] != _targetH160[0]) return;
         if (_h[1] != _targetH160[1] || _h[2] != _targetH160[2] || _h[3] != _targetH160[3] || _h[4] != _targetH160[4]) return;
+        goto addItem;
+    }
+
+    if (_bloomK) {
+        uint32_t bit = _h[0];
+        uint32_t step = _h[1] | 1;
+        for (uint32_t k = 0; k < _bloomK; k++) {
+            uint32_t idx = bit & _bloomMask;
+            if (!(__ldg(_bloomBits + (idx >> 5)) & (1u << (idx & 31)))) return;
+            bit += step;
+        }
         goto addItem;
     }
 
@@ -85,7 +103,7 @@ __device__ CHECK_INLINE void CheckPoint(uint32_t *_h, int32_t incr, address_t *a
     addItem:
 
         pos = atomicAdd(out, 1);
-        //if (pos < maxFound) {
+        if (pos < _maxFound) {
             uint32_t   tid = (blockIdx.x * blockDim.x) + threadIdx.x;
             out[pos * ITEM_SIZE32 + 1] = tid;
             out[pos * ITEM_SIZE32 + 2] = (uint32_t)(incr << 16) | (uint32_t)(1 << 15);
@@ -94,7 +112,7 @@ __device__ CHECK_INLINE void CheckPoint(uint32_t *_h, int32_t incr, address_t *a
             out[pos * ITEM_SIZE32 + 5] = _h[2];
             out[pos * ITEM_SIZE32 + 6] = _h[3];
             out[pos * ITEM_SIZE32 + 7] = _h[4];
-        //}
+        }
 
     }
 

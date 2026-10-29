@@ -63,9 +63,10 @@ public:
   GPUEngine(int gpuId, uint32_t maxFound);
   ~GPUEngine();
   void FreeGPUEngine();
-  void SetAddress(std::vector<address_t> addresses);
-  void SetAddress(std::vector<LADDRESS> addresses,uint32_t totalAddress);
+  bool SetAddress(std::vector<address_t> addresses);
+  bool SetAddress(std::vector<LADDRESS> addresses,uint32_t totalAddress);
   bool SetSingleTarget(const uint8_t *hash160);
+  bool SetBloom(const std::vector<const uint8_t *> &hash160s);
   bool SetKeys(Point *p);
   bool SetRandomJump(Point p);
   void SetSearchMode(int searchMode);
@@ -75,6 +76,7 @@ public:
   int GetNbThread();
   int GetGroupSize();
   int GetStepSize();
+  bool IsInitialised();
 
   bool Check(Secp256K1 *secp);
   std::string deviceName;
@@ -85,6 +87,7 @@ public:
 private:
 
   bool callKernel();
+  void ReleaseBuffers();
   static void ComputeIndex(std::vector<int> &s, int depth, int n);
   static void Browse(FILE *f,int depth, int max, int s);
   bool CheckHash(uint8_t *h, std::vector<ITEM>& found, int tid, int incr, int endo, int *ok);
@@ -98,6 +101,7 @@ private:
   address_t *inputAddressPinned;
   uint32_t *inputAddressLookUp;
   uint32_t *inputAddressLookUpPinned;
+  uint32_t *bloomBits;
   uint64_t *inputKey;
   uint64_t *inputKeyPinned;
   uint32_t *outputBuffer;

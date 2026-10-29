@@ -59,7 +59,15 @@ int _ConvertSMVer2Cores(int major, int minor) {
         {0x75,  64},
         {0x80,  64},
         {0x86,  128},
+        {0x87,  128},
         {0x89,  128},
+        {0x90,  128},
+        {0xa0,  128},
+        {0xa1,  128},
+        {0xa3,  128},
+        {0xb0,  128},
+        {0xc0,  128},
+        {0xc1,  128},
         {-1, -1} };
 
     int index = 0;
@@ -258,8 +266,48 @@ std::string globalGPUname;
 
 GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
 
+    // Every buffer starts out unallocated so that the destructor is safe after a failed init
+    inputAddress = NULL;
+    inputAddressPinned = NULL;
+    inputAddressLookUp = NULL;
+    inputAddressLookUpPinned = NULL;
+    bloomBits = NULL;
+    inputKey = NULL;
+    inputKeyPinned = NULL;
+    outputBuffer = NULL;
+    outputBufferPinned = NULL;
+    initialised = false;
+    lostWarning = false;
+    rekey = false;
+    nbThread = 0;
+    this->maxFound = maxFound;
+    outputSize = 0;
+
+    int deviceCount = 0;
+    cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
+
+    if (error_id != cudaSuccess) {
+        fprintf(stderr, "GPUEngine: CudaGetDeviceCount %s\n", cudaGetErrorString(error_id));
+        return;
+    }
+
+    // This function call returns 0 if there are no CUDA capable devices.
+    if (deviceCount == 0) {
+        fprintf(stderr, "GPUEngine: There are no available device(s) that support CUDA\n");
+        return;
+    }
+
+    if (gpuId < 0 || gpuId >= deviceCount) {
+        fprintf(stderr, "GPUEngine: invalid GPU id %d (%d device(s) found, use -l to list them)\n", gpuId, deviceCount);
+        return;
+    }
+
     cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, gpuId);
+    error_id = cudaGetDeviceProperties(&deviceProp, gpuId);
+    if (error_id != cudaSuccess) {
+        fprintf(stderr, "GPUEngine: cudaGetDeviceProperties %s\n", cudaGetErrorString(error_id));
+        return;
+    }
 
     NB_TRHEAD_PER_GROUP = VS_TPB;                                          //////////////////  GRID SIZE ////////////////
     int nbThreadGroup = deviceProp.multiProcessorCount * VS_BPSM;
@@ -274,31 +322,15 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
         nbThreadGroup = powerOfTwo;
     }
 
-    
+
     g_gpuId = gpuId;
 
     // Initialise CUDA
-    this->rekey = rekey;
-    initialised = false;
     cudaError_t err;
-
-    int deviceCount = 0;
-    cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
-
-    if (error_id != cudaSuccess) {
-        printf("GPUEngine: CudaGetDeviceCount %s\n", cudaGetErrorString(error_id));
-        return;
-    }
-
-    // This function call returns 0 if there are no CUDA capable devices.
-    if (deviceCount == 0) {
-        printf("GPUEngine: There are no available device(s) that support CUDA\n");
-        return;
-    }
 
     err = cudaSetDevice(gpuId);
     if (err != cudaSuccess) {
-        printf("GPUEngine: %s\n", cudaGetErrorString(err));
+        fprintf(stderr, "GPUEngine: %s\n", cudaGetErrorString(err));
         return;
     }
 
@@ -386,38 +418,77 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
         return;
     }
 
+    // The kernel drops hits beyond the output buffer instead of writing past its end
+    err = cudaMemcpyToSymbol(_maxFound, &maxFound, sizeof(maxFound));
+    if (err != cudaSuccess) {
+        printf("GPUEngine: Set maxFound: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
     searchMode = SEARCH_COMPRESSED;
     searchType = P2PKH;
     initialised = true;
     pattern = "";
     hasPattern = false;
-    inputAddressLookUp = NULL;
 
 }
 
 GPUEngine::~GPUEngine() {
 
-    cudaFree(inputKey);
-    cudaFree(inputAddress);
-    if (inputAddressLookUp) cudaFree(inputAddressLookUp);
-    cudaFreeHost(outputBufferPinned);
-    cudaFree(outputBuffer);
+    ReleaseBuffers();
+
 }
 
+void GPUEngine::ReleaseBuffers() {
 
+    if (inputKey) cudaFree(inputKey);
+    if (inputAddress) cudaFree(inputAddress);
+    if (inputAddressLookUp) cudaFree(inputAddressLookUp);
+    if (bloomBits) cudaFree(bloomBits);
+    if (outputBuffer) cudaFree(outputBuffer);
+    if (inputAddressPinned) cudaFreeHost(inputAddressPinned);
+    if (inputAddressLookUpPinned) cudaFreeHost(inputAddressLookUpPinned);
+    if (inputKeyPinned) cudaFreeHost(inputKeyPinned);
+    if (outputBufferPinned) cudaFreeHost(outputBufferPinned);
+
+    inputKey = NULL;
+    inputAddress = NULL;
+    inputAddressLookUp = NULL;
+    bloomBits = NULL;
+    outputBuffer = NULL;
+    inputAddressPinned = NULL;
+    inputAddressLookUpPinned = NULL;
+    inputKeyPinned = NULL;
+    outputBufferPinned = NULL;
+
+}
+
+bool GPUEngine::IsInitialised() {
+    return initialised;
+}
 
 void GPUEngine::PrintCudaInfo() {
 
     int deviceCount = 0;
     cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
+    if (error_id != cudaSuccess) {
+        fprintf(stderr, "GPUEngine: CudaGetDeviceCount %s\n", cudaGetErrorString(error_id));
+        return;
+    }
 
+    if (deviceCount == 0) {
+        printf("No CUDA capable device found\n");
+        return;
+    }
 
     for (int i = 0;i < deviceCount;i++) {
 
         cudaDeviceProp deviceProp;
-        cudaGetDeviceProperties(&deviceProp, i);
+        if (cudaGetDeviceProperties(&deviceProp, i) != cudaSuccess)
+            continue;
 
-        printf("%d , %s", i, deviceProp.name);
+        printf("GPU #%d %s (sm_%d%d, %d SMs, %.1f GB)\n", i, deviceProp.name, deviceProp.major, deviceProp.minor,
+            deviceProp.multiProcessorCount, (double)deviceProp.totalGlobalMem / (1024.0 * 1024.0 * 1024.0));
 
     }
 
@@ -441,7 +512,7 @@ void GPUEngine::SetSearchType(int searchType) {
 
 
 
-void GPUEngine::SetAddress(std::vector<address_t> addresses) {
+bool GPUEngine::SetAddress(std::vector<address_t> addresses) {
 
     memset(inputAddressPinned, 0, _64K * 2);
     for (int i = 0;i < (int)addresses.size();i++)
@@ -458,7 +529,9 @@ void GPUEngine::SetAddress(std::vector<address_t> addresses) {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("GPUEngine: SetAddress: %s\n", cudaGetErrorString(err));
+        return false;
     }
+    return true;
 
 }
 
@@ -485,18 +558,18 @@ void GPUEngine::SetPattern(const char* pattern) {
 
 
 
-void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddress) {
+bool GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddress) {
 
     // Allocate memory for the second level of lookup tables
     cudaError_t err = cudaMalloc((void**)&inputAddressLookUp, (_64K + totalAddress) * 4);
     if (err != cudaSuccess) {
         printf("GPUEngine: Allocate address lookup memory: %s\n", cudaGetErrorString(err));
-        return;
+        return false;
     }
     err = cudaHostAlloc(&inputAddressLookUpPinned, (_64K + totalAddress) * 4, cudaHostAllocWriteCombined | cudaHostAllocMapped);
     if (err != cudaSuccess) {
         printf("GPUEngine: Allocate address lookup pinned memory: %s\n", cudaGetErrorString(err));
-        return;
+        return false;
     }
 
     uint32_t offset = _64K;
@@ -513,7 +586,7 @@ void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddres
 
     if (offset != (_64K + totalAddress)) {
         printf("GPUEngine: Wrong totalAddress %d!=%d!\n", offset - _64K, totalAddress);
-        return;
+        return false;
     }
 
     // Fill device memory
@@ -531,7 +604,70 @@ void GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddres
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("GPUEngine: SetAddress (large): %s\n", cudaGetErrorString(err));
+        return false;
     }
+    return true;
+
+}
+
+// Multi full-address search. The filter has 32..64 bits per address (rounded up to a power of
+// two) and 8 probes: about 1.2 memory reads per key and a false positive rate of 4e-8..6e-6,
+// which the CPU check removes. The probes are taken from the hash160 itself, which is uniform.
+bool GPUEngine::SetBloom(const std::vector<const uint8_t*>& hash160s) {
+
+    uint64_t n = hash160s.size();
+    uint64_t nbBits = 1ULL << 18;                       // 32 KB minimum
+    while (nbBits < n * 32 && nbBits < (1ULL << 32))
+        nbBits <<= 1;
+    uint32_t k = 8;
+    size_t nbWords = (size_t)(nbBits / 32);
+
+    std::vector<uint32_t> bits(nbWords, 0);
+    for (uint64_t i = 0; i < n; i++) {
+        uint32_t h[5];
+        memcpy(h, hash160s[i], 20);
+        uint32_t bit = h[0];
+        uint32_t step = h[1] | 1;
+        for (uint32_t j = 0; j < k; j++) {
+            uint32_t idx = bit & (uint32_t)(nbBits - 1);
+            bits[idx >> 5] |= 1u << (idx & 31);
+            bit += step;
+        }
+    }
+
+    size_t setBits = 0;
+    for (size_t i = 0; i < nbWords; i++) {
+        uint32_t w = bits[i];
+        while (w) { w &= w - 1; setBits++; }
+    }
+    double fill = (double)setBits / (double)nbBits;
+    double fpRate = pow(fill, (double)k);
+
+    cudaError_t err = cudaMalloc((void**)&bloomBits, nbWords * 4);
+    if (err != cudaSuccess) {
+        printf("GPUEngine: Allocate bloom filter (%.1f MB): %s\n", nbWords * 4 / 1048576.0, cudaGetErrorString(err));
+        return false;
+    }
+    cudaMemcpy(bloomBits, bits.data(), nbWords * 4, cudaMemcpyHostToDevice);
+
+    uint32_t mask = (uint32_t)(nbBits - 1);
+    const uint32_t* ptr = bloomBits;
+    cudaMemcpyToSymbol(_bloomMask, &mask, sizeof(mask));
+    cudaMemcpyToSymbol(_bloomBits, &ptr, sizeof(ptr));
+    cudaMemcpyToSymbol(_bloomK, &k, sizeof(k));
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("GPUEngine: SetBloom: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+
+    double perLaunch = fpRate * (double)nbThread * (double)STEP_SIZE;
+    printf("Bloom filter: %llu addresses, %.1f MB, %u probes, false positive rate %.1e (~%.0f per launch)\n",
+        (unsigned long long)n, nbWords * 4 / 1048576.0, k, fpRate, perLaunch);
+    if (perLaunch > maxFound / 4.0)
+        printf("Warning: false positives may fill the hit buffer, increase -m (now %u)\n", maxFound);
+    return true;
 
 }
 
@@ -622,6 +758,7 @@ bool GPUEngine::SetKeys(Point* p) {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("GPUEngine: SetKeys: %s\n", cudaGetErrorString(err));
+        return false;
     }
 
     return callKernel();
@@ -677,7 +814,8 @@ bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
 
     if(spinWait) {
 
-      cudaMemcpy(outputBufferPinned, outputBuffer, outputSize, cudaMemcpyDeviceToHost);
+      // Waits for the kernel; only the hit counter is needed here, the items are copied below
+      cudaMemcpy(outputBufferPinned, outputBuffer, 4, cudaMemcpyDeviceToHost);
 
     } else {
 
@@ -709,7 +847,7 @@ bool GPUEngine::Launch(std::vector<ITEM>& addressFound, bool spinWait) {
     if (nbFound > maxFound) {
       // address has been lost
       if (!lostWarning) {
-        printf("\nWarning, %d items lost\nHint: Search with less addresses/prefixes or increase maxFound (-m) using multiple of 65536\n", (nbFound - maxFound));
+        printf("\nWarning, %u items lost\nHint: Search with less addresses/prefixes or increase maxFound (-m)\n", (nbFound - maxFound));
         lostWarning = true;
       }
       nbFound = maxFound;
@@ -754,25 +892,8 @@ void GPUEngine::FreeGPUEngine() {  //free gpu for Pause function
     // Ensure all operations have completed before freeing memory
     cudaDeviceSynchronize();
 
-    // Free device memory
-    cudaFree(inputKey);
-    cudaFree(inputAddress);
-    if (inputAddressLookUp) {
-        cudaFree(inputAddressLookUp);  // Free the lookup table memory if allocated
-    }
-    cudaFree(outputBuffer);
-
-    // Free pinned memory
-    cudaFreeHost(inputAddressPinned);
-    cudaFreeHost(inputKeyPinned);
-    cudaFreeHost(outputBufferPinned);
-
-    // Reset the pointers to prevent dangling references
-    inputAddressPinned = NULL;
-    inputKeyPinned = NULL;
-    outputBufferPinned = NULL;
-    inputAddressLookUpPinned = NULL;
-    inputAddressLookUp = NULL;
+    ReleaseBuffers();
+    initialised = false;
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
