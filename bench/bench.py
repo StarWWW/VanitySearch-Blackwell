@@ -7,7 +7,6 @@ selftest hides a random key in an aligned 2^bits range, asks the tool to find it
 verifies the reported key independently (pure-Python secp256k1 + hash160). --target picks the
 GPU path under test:
   single  one P2PKH address (constant-memory compare)       bech32  one bc1q address
-  bloom   the address among --decoys random ones (-i file)   tables  the same with -nobloom
   prefix  the first characters of the address; any key of the range with that prefix passes
 speed runs the builds interleaved (A B A B ...) on the same range so thermal drift
 hits all of them equally, and reports the median MK/s after a warm-up period.
@@ -166,7 +165,7 @@ def run_tool(cmd, timeout, on_line):
         p.wait()
 
 
-def selftest(exe, bits, n, timeout, random=False, target='single', decoys=1000):
+def selftest(exe, bits, n, timeout, random=False, target='single'):
     ok_all = True
     to_addr = (lambda c: p2wpkh(hash160_from_key(c))) if target == 'bech32' else addr_from_key
     for i in range(n):
@@ -186,21 +185,9 @@ def selftest(exe, bits, n, timeout, random=False, target='single', decoys=1000):
                     if a == addr or (target == 'prefix' and a.startswith(pattern)): found.append(cand)
             return bool(found) or 'Range Finished' in s
 
-        cmd = [exe, '-gpuId', '0', '-start', f'{base:x}', '-range', str(bits), '-stop'] + (['-random'] if random else [])
-        listfile = None
-        if target in ('bloom', 'tables'):
-            # the planted address hidden among random ones, in the middle of the file
-            listfile = os.path.join(os.path.dirname(exe), f'selftest_{os.getpid()}.txt')
-            lines = [b58check(b'\x00' + secrets.token_bytes(20)) for _ in range(decoys)]
-            lines.insert(len(lines) // 2, addr)
-            with open(listfile, 'w') as fl: fl.write('\n'.join(lines) + '\n')
-            cmd += ['-i', listfile] + (['-nobloom'] if target == 'tables' else [])
-        else:
-            cmd += [pattern]
-        try:
-            run_tool(cmd, timeout, on_line)
-        finally:
-            if listfile: os.remove(listfile)
+        cmd = [exe, '-gpuId', '0', '-start', f'{base:x}', '-range', str(bits), '-stop'] + \
+              (['-random'] if random else []) + [pattern]
+        run_tool(cmd, timeout, on_line)
         if target == 'prefix':
             ok = bool(found) and base <= found[0] < base + (1 << bits)
         else:
@@ -235,14 +222,13 @@ def main():
     ap.add_argument('--warmup', type=float, default=15)
     ap.add_argument('--rounds', type=int, default=3)
     ap.add_argument('--random', action='store_true', help='selftest using the -random mode')
-    ap.add_argument('--target', default='single', choices=['single', 'bech32', 'bloom', 'tables', 'prefix'],
+    ap.add_argument('--target', default='single', choices=['single', 'bech32', 'prefix'],
                     help='selftest: which search path to test (see above)')
-    ap.add_argument('--decoys', type=int, default=1000, help='selftest bloom/tables: random addresses next to the target')
     a = ap.parse_args()
     a.exes = [os.path.abspath(e) for e in a.exes]
     if a.mode == 'selftest':
         bad = [e for e in a.exes if not (print(e) or selftest(e, a.bits, a.n, timeout=300, random=a.random,
-                                                             target=a.target, decoys=a.decoys))]
+                                                             target=a.target))]
         sys.exit(1 if bad else 0)
     start = (1 << 70) + (secrets.randbelow(1 << 30) << 40)
     res = {e: [] for e in a.exes}

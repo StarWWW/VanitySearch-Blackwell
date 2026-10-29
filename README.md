@@ -48,12 +48,7 @@ and a better launch shape.
   architectures that CUDA 13 still supports (sm_75 … sm_120).
 * `bench/build.py` finds any Visual Studio 2022 edition, and builds older refs with their own
   source list.
-* `tools/fetch_addresses.py` resumes an interrupted download.
-* The notebook's `multi` mode tests the bloom-filter path (with the list's address type) before it
-  searches, accepts the keys of `bech32` lists (they were checked as `1...` addresses and dropped),
-  gives a large list time to load before its watchdog restarts the tool, uses longer blocks with
-  the `blocks` strategy (the list is reloaded for each block), and does not record the same found
-  key again in every session.
+* The notebook does not record the same found key again in every session.
 * Unused code was removed: leftover RCKangaroo headers, the wildcard and SSE address checks, P2SH
   branches, empty GPU checks, and the original prebuilt FixedPaul binaries (`VanitySearch 2.2/`,
   still in the git history).
@@ -77,48 +72,6 @@ and a better launch shape.
   progress and ETA no longer show `51200%` or negative times; P2SH (`3...`) addresses, which the
   kernel cannot match, are rejected with a message.
 
-### Multi-address search (bloom filter)
-
-Pass several full addresses (on the command line or with `-i file`) and the GPU tests every key against a
-bloom filter of their hash160s. The filter uses 32–64 bits per address and 8 probes, so most keys cost
-about 1.2 memory reads. The CPU then removes the rare false positives (rate 4·10⁻⁸ to 6·10⁻⁶). One
-address still uses the constant-memory fast path, and prefixes still use the lookup tables. Measured on
-an RTX 5050 Laptop, a 2^34 range with 5 planted keys hidden among random addresses:
-
-| Addresses | Bloom filter | Old 16/32-bit tables (`-nobloom`) |
-|---|---|---|
-| 1 | 1173 MK/s (single-target path) | same |
-| 1,000,005 | 1143 MK/s (4 MB filter), 5/5 found | 1090 MK/s, 5/5 found |
-| 10,000,005 | 1099 MK/s (64 MB filter), 5/5 found | 967 MK/s, **1/5 found** (988,345 hits lost) |
-
-With 10M addresses the old tables pass about 0.2% of all keys to the CPU, so the hit buffer
-overflows and real hits are dropped. The bloom filter passes about 72 per launch.
-
-### Address lists from Hugging Face
-
-[`tools/fetch_addresses.py`](tools/fetch_addresses.py) downloads a list of funded Bitcoin addresses
-from the [`pymmdrza/Bitcoin_Wallet_Addresses`](https://huggingface.co/datasets/pymmdrza/Bitcoin_Wallet_Addresses)
-dataset and writes it as a plain `.txt` for `-i`.
-
-```
-python tools/fetch_addresses.py p2pkh   -o rich_p2pkh.txt    # 1... addresses
-python tools/fetch_addresses.py bech32  -o rich_bech32.txt   # bc1q... addresses
-python tools/fetch_addresses.py --list                       # show the available lists
-vanitysearch -start 1 -range 40 -stop -i rich_p2pkh.txt
-```
-
-The dataset is **gated**: open its page while signed in and accept the terms, create a read token at
-<https://huggingface.co/settings/tokens>, then pass it with `--token` or set `HF_TOKEN`. The script
-streams the download straight to the `.txt`, so the full file is never held in memory, but the lists
-are large (hundreds of MB compressed, a few GB uncompressed). Search **one address type per run** —
-the tool takes the type of the first address and ignores the rest, so use the `p2pkh` file for a
-P2PKH search and the `bech32` file for a BECH32 search. The `p2sh` (`3...`) list is not searchable by
-this tool's kernel.
-
-> A random search against arbitrary funded wallets has no realistic chance of a hit: their keys are
-> uniform over 2^256. This is useful for benchmarking the filter at scale or for weak-key research on
-> keys you already control, not for finding other people's keys.
-
 ## Usage
 
 ```
@@ -135,7 +88,6 @@ vanitysearch [-gpuId N] [-start HEX] [-range BITS | -end HEX] [-stop] [-random] 
 | `-random` | At every step all GPU threads jump to the same random offset within their own slice of the range. |
 | `-backup` | Resume from `VSbackup_gpu<N>.dat`. The file is written every 60 launches, on pause, on Ctrl+C and at the end. A new run without `-backup` keeps the previous file as `.prev`. |
 | `-i file` / `-o file` | Addresses to search (one per line, `#` comments) / file the found keys are appended to (with public key and time). |
-| `-nobloom` | **New:** use the old 16/32-bit tables instead of the bloom filter for several full addresses. |
 | `-gpuId N` | GPU to use. One GPU per process: run one instance per GPU. |
 | `-l` | **New:** list the CUDA devices. |
 | `-h`, `-v` | Help, version. |
@@ -166,14 +118,12 @@ to (`msbuild /p:CudaVersion=12.8` picks another installed one).
 ```
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 36 --n 3            # sequential
 python bench/bench.py selftest build/opt/vanitysearch.exe --bits 34 --n 3 --random   # -random mode
-python bench/bench.py selftest build/opt/vanitysearch.exe --target bloom             # several addresses
 ```
 
 The self-test hides a random key in a small range and runs the tool. It then re-derives the
 reported key's address in pure Python, independently of the tool. `--target` selects the GPU path:
-`single` (default, one `1...` address), `bech32` (one `bc1q...` address), `bloom` (the address among
-1000 random ones, `-i`), `tables` (the same with `-nobloom`) and `prefix` (the first characters of the
-address; any key of the range with that prefix passes).
+`single` (default, one `1...` address), `bech32` (one `bc1q...` address) and `prefix` (the first
+characters of the address; any key of the range with that prefix passes).
 
 ## Google Colab
 
@@ -183,11 +133,7 @@ clone), builds it for the attached GPU and runs a self-test before searching. A 
 built with the same compiler settings is reused instead of rebuilt. If the self-test fails, it
 falls back to the original FixedPaul source from this repository's first commit. Found keys are checked
 independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
-realistic odds up front. Set `SEARCH_MODE = "multi"` to search an address list instead of the single
-puzzle address: the notebook downloads the chosen list with `tools/fetch_addresses.py` (needs an
-`HF_TOKEN`, see above) and searches it through the GPU bloom filter; its self-test then hides the test address in a list of the same
-address type, so the bloom-filter path is what gets tested. The same notebook also runs
-outside Colab, in any Jupyter on Linux (apt-based
+realistic odds up front. The same notebook also runs outside Colab, in any Jupyter on Linux (apt-based
 CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in
 `~/vanitysearch-puzzle/`, or in `$PUZZLE_HOME` if set.
 

@@ -264,7 +264,6 @@ GPUEngine::GPUEngine(int gpuId, uint32_t maxFound) {
     inputAddressPinned = NULL;
     inputAddressLookUp = NULL;
     inputAddressLookUpPinned = NULL;
-    bloomBits = NULL;
     inputKey = NULL;
     inputKeyPinned = NULL;
     outputBuffer = NULL;
@@ -430,7 +429,6 @@ void GPUEngine::ReleaseBuffers() {
     if (inputKey) cudaFree(inputKey);
     if (inputAddress) cudaFree(inputAddress);
     if (inputAddressLookUp) cudaFree(inputAddressLookUp);
-    if (bloomBits) cudaFree(bloomBits);
     if (outputBuffer) cudaFree(outputBuffer);
     if (inputAddressPinned) cudaFreeHost(inputAddressPinned);
     if (inputAddressLookUpPinned) cudaFreeHost(inputAddressLookUpPinned);
@@ -440,7 +438,6 @@ void GPUEngine::ReleaseBuffers() {
     inputKey = NULL;
     inputAddress = NULL;
     inputAddressLookUp = NULL;
-    bloomBits = NULL;
     outputBuffer = NULL;
     inputAddressPinned = NULL;
     inputAddressLookUpPinned = NULL;
@@ -569,67 +566,6 @@ bool GPUEngine::SetAddress(std::vector<LADDRESS> addresses, uint32_t totalAddres
         printf("GPUEngine: SetAddress (large): %s\n", cudaGetErrorString(err));
         return false;
     }
-    return true;
-
-}
-
-// Multi full-address search. The filter has 32..64 bits per address (rounded up to a power of
-// two) and 8 probes: about 1.2 memory reads per key and a false positive rate of 4e-8..6e-6,
-// which the CPU check removes. The probes are taken from the hash160 itself, which is uniform.
-bool GPUEngine::SetBloom(const std::vector<const uint8_t*>& hash160s) {
-
-    uint64_t n = hash160s.size();
-    uint64_t nbBits = 1ULL << 18;                       // 32 KB minimum
-    while (nbBits < n * 32 && nbBits < (1ULL << 32))
-        nbBits <<= 1;
-    uint32_t k = 8;
-    size_t nbWords = (size_t)(nbBits / 32);
-
-    std::vector<uint32_t> bits(nbWords, 0);
-    for (uint64_t i = 0; i < n; i++) {
-        uint32_t h[5];
-        memcpy(h, hash160s[i], 20);
-        uint32_t bit = h[0];
-        uint32_t step = h[1] | 1;
-        for (uint32_t j = 0; j < k; j++) {
-            uint32_t idx = bit & (uint32_t)(nbBits - 1);
-            bits[idx >> 5] |= 1u << (idx & 31);
-            bit += step;
-        }
-    }
-
-    size_t setBits = 0;
-    for (size_t i = 0; i < nbWords; i++) {
-        uint32_t w = bits[i];
-        while (w) { w &= w - 1; setBits++; }
-    }
-    double fill = (double)setBits / (double)nbBits;
-    double fpRate = pow(fill, (double)k);
-
-    cudaError_t err = cudaMalloc((void**)&bloomBits, nbWords * 4);
-    if (err != cudaSuccess) {
-        printf("GPUEngine: Allocate bloom filter (%.1f MB): %s\n", nbWords * 4 / 1048576.0, cudaGetErrorString(err));
-        return false;
-    }
-    cudaMemcpy(bloomBits, bits.data(), nbWords * 4, cudaMemcpyHostToDevice);
-
-    uint32_t mask = (uint32_t)(nbBits - 1);
-    const uint32_t* ptr = bloomBits;
-    cudaMemcpyToSymbol(_bloomMask, &mask, sizeof(mask));
-    cudaMemcpyToSymbol(_bloomBits, &ptr, sizeof(ptr));
-    cudaMemcpyToSymbol(_bloomK, &k, sizeof(k));
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("GPUEngine: SetBloom: %s\n", cudaGetErrorString(err));
-        return false;
-    }
-
-    double perLaunch = fpRate * (double)nbThread * (double)STEP_SIZE;
-    printf("Bloom filter: %llu addresses, %.1f MB, %u probes, false positive rate %.1e (~%.0f per launch)\n",
-        (unsigned long long)n, nbWords * 4 / 1048576.0, k, fpRate, perLaunch);
-    if (perLaunch > maxFound / 4.0)
-        printf("Warning: false positives may fill the hit buffer, increase -m (now %u)\n", maxFound);
     return true;
 
 }

@@ -54,7 +54,6 @@ VanitySearch::VanitySearch(Secp256K1* secp, vector<std::string>& inputAddresses,
 	this->endOfSearch = false;
 	this->searchStatus = SEARCH_RUNNING;
 	this->nbFoundKey = 0;
-	this->useBloom = true;
 
 	addresses.clear();
 
@@ -848,17 +847,6 @@ void VanitySearch::FindKeyGPU(TH_PARAM* ph) {
 				break;
 			}
 		}
-	}
-	else if (onlyFull && useBloom) {
-		// The bloom filter replaces the 16/32-bit tables, which saturate with many addresses
-		vector<const uint8_t*> hashes;
-		hashes.reserve(nbAddress);
-		for (int i = 0; i < (int)usedAddress.size(); i++) {
-			vector<ADDRESS_ITEM>* items = addresses[usedAddress[i]].items;
-			for (int j = 0; j < (int)items->size(); j++)
-				hashes.push_back((*items)[j].hash160);
-		}
-		ok = g.SetBloom(hashes);
 	}
 	else if (onlyFull) {
 		ok = g.SetAddress(usedAddressL, nbAddress);

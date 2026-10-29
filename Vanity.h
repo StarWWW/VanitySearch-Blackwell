@@ -115,7 +115,6 @@ public:
 	int Search(int gpuId);
 	void FindKeyGPU(TH_PARAM* p);
 	int GetNbFound() { return nbFoundKey; }
-	void SetUseBloom(bool use) { useBloom = use; }
 
 private:
 
@@ -145,7 +144,6 @@ private:
 	uint32_t nbAddress;
 	std::string outputFile;
 	bool onlyFull;
-	bool useBloom;
 	uint32_t maxFound;
 	std::vector<ADDRESS_TABLE_ITEM> addresses;
 	std::vector<address_t> usedAddress;

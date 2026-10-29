@@ -64,7 +64,6 @@ public:
   bool SetAddress(std::vector<address_t> addresses);
   bool SetAddress(std::vector<LADDRESS> addresses,uint32_t totalAddress);
   bool SetSingleTarget(const uint8_t *hash160);
-  bool SetBloom(const std::vector<const uint8_t *> &hash160s);
   bool SetKeys(Point *p);
   bool SetRandomJump(Point p);
   void SetSearchMode(int searchMode);
@@ -90,7 +89,6 @@ private:
   address_t *inputAddressPinned;
   uint32_t *inputAddressLookUp;
   uint32_t *inputAddressLookUpPinned;
-  uint32_t *bloomBits;
   uint64_t *inputKey;
   uint64_t *inputKeyPinned;
   uint32_t *outputBuffer;

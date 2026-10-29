@@ -148,14 +148,12 @@ using namespace std;
 void printUsage() {
 
 	printf("VanitySearch [-v] [-h] [-l] [-gpuId N] [-i inputfile] [-o outputfile] [-start HEX]\n");
-	printf("             [-range BITS | -end HEX] [-m N] [-stop] [-random] [-backup] [-nobloom] [address ...]\n\n");
+	printf("             [-range BITS | -end HEX] [-m N] [-stop] [-random] [-backup] [address ...]\n\n");
 	printf(" -v            Print version\n");
 	printf(" -h            Print this help\n");
 	printf(" -l            List the CUDA devices and exit\n");
 	printf(" -gpuId N      GPU to use, default 0. One GPU per process: run one instance per GPU\n");
-	printf(" -i file       Read the addresses to search from a file (one per line, # for comments).\n");
-	printf("               Several full addresses are matched on the GPU through a bloom filter\n");
-	printf(" -nobloom      Use the 16/32-bit lookup tables instead of the bloom filter\n");
+	printf(" -i file       Read the addresses to search from a file (one per line, # for comments)\n");
 	printf(" -o file       Also append the found keys to this file\n");
 	printf(" -start HEX    First private key of the range, default 1\n");
 	printf(" -range BITS   Range size, start -> start + 2^BITS - 1 (1..256), default 30\n");
@@ -275,7 +273,6 @@ int main(int argc, char* argv[]) {
 	int a = 1;
 	bool stop = false;
 	bool backupMode = false;
-	bool useBloom = true;
 	int searchMode = SEARCH_COMPRESSED;
 	int gpuId = 0;
 	vector<string> address;
@@ -343,10 +340,6 @@ int main(int argc, char* argv[]) {
 		}
 		else if (strcmp(argv[a], "-random") == 0) {
 			randomMode = true;
-			a++;
-		}
-		else if (strcmp(argv[a], "-nobloom") == 0) {
-			useBloom = false;
 			a++;
 		}
 		else if (strcmp(argv[a], "-backup") == 0) {
@@ -504,7 +497,6 @@ int main(int argc, char* argv[]) {
 	// One search object for the whole run: a resume after a pause keeps the addresses already
 	// found, so -stop still stops once every address has been found
 	VanitySearch* v = new VanitySearch(secp, address, searchMode, stop, outputFile, maxFound, bc);
-	v->SetUseBloom(useBloom);
 
 	while (true) {
 
