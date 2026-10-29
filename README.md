@@ -68,6 +68,31 @@ an RTX 5050 Laptop, a 2^34 range with 5 planted keys hidden among random address
 With 10M addresses the old tables pass about 0.2% of all keys to the CPU, so the hit buffer
 overflows and real hits are dropped. The bloom filter passes about 72 per launch.
 
+### Address lists from Hugging Face
+
+[`tools/fetch_addresses.py`](tools/fetch_addresses.py) downloads a list of funded Bitcoin addresses
+from the [`pymmdrza/Bitcoin_Wallet_Addresses`](https://huggingface.co/datasets/pymmdrza/Bitcoin_Wallet_Addresses)
+dataset and writes it as a plain `.txt` for `-i`.
+
+```
+python tools/fetch_addresses.py p2pkh   -o rich_p2pkh.txt    # 1... addresses
+python tools/fetch_addresses.py bech32  -o rich_bech32.txt   # bc1q... addresses
+python tools/fetch_addresses.py --list                       # show the available lists
+vanitysearch -start 1 -range 40 -stop -i rich_p2pkh.txt
+```
+
+The dataset is **gated**: open its page while signed in and accept the terms, create a read token at
+<https://huggingface.co/settings/tokens>, then pass it with `--token` or set `HF_TOKEN`. The script
+streams the download straight to the `.txt`, so the full file is never held in memory, but the lists
+are large (hundreds of MB compressed, a few GB uncompressed). Search **one address type per run** —
+the tool takes the type of the first address and ignores the rest, so use the `p2pkh` file for a
+P2PKH search and the `bech32` file for a BECH32 search. The `p2sh` (`3...`) list is not searchable by
+this tool's kernel.
+
+> A random search against arbitrary funded wallets has no realistic chance of a hit: their keys are
+> uniform over 2^256. This is useful for benchmarking the filter at scale or for weak-key research on
+> keys you already control, not for finding other people's keys.
+
 ## Usage
 
 ```
@@ -124,7 +149,10 @@ Its UI is in Turkish. It clones this repository (`VS_REPO` / `VS_REF`, which can
 clone), builds it for the attached GPU and runs a self-test before searching. If the self-test fails, it
 falls back to the original FixedPaul source from this repository's first commit. Found keys are checked
 independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
-realistic odds up front. The same notebook also runs outside Colab, in any Jupyter on Linux (apt-based
+realistic odds up front. Set `SEARCH_MODE = "multi"` to search an address list instead of the single
+puzzle address: the notebook downloads the chosen list with `tools/fetch_addresses.py` (needs an
+`HF_TOKEN`, see above) and searches it through the GPU bloom filter. The same notebook also runs
+outside Colab, in any Jupyter on Linux (apt-based
 CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in
 `~/vanitysearch-puzzle/`, or in `$PUZZLE_HOME` if set.
 

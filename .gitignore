@@ -12,3 +12,7 @@ __pycache__/
 *.sqlite
 # local helper, not part of the project
 /publish.ps1
+# runtime backup files
+VSbackup_*.dat
+VSbackup_*.dat.prev
+VSbackup_*.dat.tmp
