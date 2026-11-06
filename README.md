@@ -48,7 +48,6 @@ and a better launch shape.
   architectures that CUDA 13 still supports (sm_75 … sm_120).
 * `bench/build.py` finds any Visual Studio 2022 edition, and builds older refs with their own
   source list.
-* The notebook does not record the same found key again in every session.
 * Unused code was removed: leftover RCKangaroo headers, the wildcard and SSE address checks, P2SH
   branches, empty GPU checks, and the original prebuilt FixedPaul binaries (`VanitySearch 2.2/`,
   still in the git history).
@@ -125,23 +124,24 @@ reported key's address in pure Python, independently of the tool. `--target` sel
 `single` (default, one `1...` address), `bech32` (one `bc1q...` address) and `prefix` (the first
 characters of the address; any key of the range with that prefix passes).
 
-## Google Colab
+## Documentation
 
-[`colab/puzzle71_blackwell.ipynb`](colab/puzzle71_blackwell.ipynb) is a self-contained notebook.
-Its UI is in Turkish. It clones this repository (`VS_REPO` / `VS_REF`, which can also be a local
-clone), builds it for the attached GPU and runs a self-test before searching. A commit that was already
-built with the same compiler settings is reused instead of rebuilt. If the self-test fails, it
-falls back to the original FixedPaul source from this repository's first commit. Found keys are checked
-independently in Python and saved to Google Drive. It targets Bitcoin puzzle #71 and explains the
-realistic odds up front. The same notebook also runs outside Colab, in any Jupyter on Linux (apt-based
-CUDA install when root) or Windows (CUDA Toolkit + VS 2022 Build Tools). There, state is kept in
-`~/vanitysearch-puzzle/`, or in `$PUZZLE_HOME` if set.
+Full guides are in [`docs/`](docs/):
+
+* [Getting started](docs/getting-started.md) — build, self-test, and a first search that finishes in a second.
+* [Usage](docs/usage.md) — every option, address formats, the progress line, pause, random mode, backup/resume.
+* [Searching a puzzle](docs/puzzle-search.md) — puzzle ranges, realistic odds, and handling a found key safely.
+* [Troubleshooting](docs/troubleshooting.md) — build and runtime errors and their fixes.
+* [How it works](docs/how-it-works.md) — what the GPU and CPU do for every key.
 
 ## Credits and license
 
 * Original VanitySearch: Jean-Luc Pons (GPLv3)
-* VanitySearch-Bitcrack: FixedPaul (GPLv3)
+* VanitySearch-Bitcrack: FixedPaul (AGPLv3)
 * Blackwell optimisation, tooling and report: VanitySearch-Blackwell (2026)
 
-Licensed under the GNU General Public License v3, see [LICENSE.txt](LICENSE.txt). Modified files
-carry a notice in their header. The full change history is in git.
+Licensed under the GNU Affero General Public License v3, like VanitySearch-Bitcrack, which it is
+based on; see [LICENSE.txt](LICENSE.txt). The files that come from Jean-Luc Pons' VanitySearch keep
+his GPLv3 notice in their header: section 13 of the GPLv3 allows combining them with AGPLv3 code, and
+the work as a whole is distributed under the AGPLv3. Modified files carry a notice in their header.
+The full change history is in git.

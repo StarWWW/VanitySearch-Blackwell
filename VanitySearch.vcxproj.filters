@@ -79,8 +79,4 @@
       <Filter>GPU</Filter>
     </CudaCompile>
   </ItemGroup>
-  <ItemGroup>
-    <None Include="vs" />
-    <None Include="VanitySearch.exe" />
-  </ItemGroup>
 </Project>

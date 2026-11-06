@@ -1,3 +1,8 @@
+> This is the README of [FixedPaul/VanitySearch-Bitcrack](https://github.com/FixedPaul/VanitySearch-Bitcrack),
+> kept for reference. Its options and numbers are upstream's; [README.md](README.md) describes this
+> repository. The "GPLv3" below is the license of Jean-Luc Pons' VanitySearch; VanitySearch-Bitcrack
+> and this repository are distributed under the AGPLv3 ([LICENSE.txt](LICENSE.txt)).
+
 # VanitySearch-Bitrack with Optimization for BTC Puzzle 
 
 # Feature
